@@ -32,6 +32,14 @@ audio = [
     "numpy>=1.26",
     "psutil>=5.9",
 ]
+webrtc = [
+    "aiortc>=1.9.0",
+    "aiohttp>=3.9.0",
+    "av>=12.0",
+    "opencv-python>=4.8",
+    "numpy>=1.26",
+    "psutil>=5.9",
+]
 
 [project.scripts]
 snowlink = "snowlink.__main__:main"
@@ -46,6 +54,7 @@ pythonpath = ["src"]
 markers = [
     "integration: local network/socket integration tests",
     "hardware: optional tests requiring real DXcam / desktop capture or WASAPI audio",
+    "network: optional tests requiring real LAN / two-machine networking",
 ]
 
 [tool.ruff]

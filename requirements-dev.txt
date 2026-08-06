@@ -8,5 +8,6 @@
 # Includes the runtime package (editable) plus pytest, pytest-asyncio, ruff, and mypy.
 # For Experiment C screen capture, also install: pip install -e ".[capture]"
 # For Experiment D WASAPI loopback audio, also install: pip install -e ".[audio]"
+# For Experiment E synthetic WebRTC video, also install: pip install -e ".[webrtc]"
 
 -e ".[dev]"

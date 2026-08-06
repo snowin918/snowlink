@@ -6,8 +6,8 @@ VPNs connected) before the full application is built.
 
 ## Status
 
-Experiments **A**, **B**, **C**, and **D** are implemented. Experiments E–F
-are **not** implemented yet.
+Experiments **A**, **B**, **C**, **D**, and **E** are implemented.
+Experiment F is **not** implemented yet.
 
 Do not treat scripts here as production application architecture. Prefer printed
 pass/fail output and optional metrics JSON. VPN / LAN failure guidance from
@@ -21,7 +21,7 @@ Experiment B lives in `docs/vpn-lan-access.md`.
 | **B** | Two-machine TCP connect with **both VPNs enabled** | Real LAN reachability under VPN; failure modes for allow-LAN / split-tunnel guidance | **Implemented** |
 | **C** | DXcam capture → local preview + FPS/latency counters | Desktop Duplication viability | **Implemented** |
 | **D** | WASAPI loopback → local playback + underrun metrics | System-audio capture | **Implemented** |
-| **E** | aiortc synthetic video track | WebRTC video / ICE host behavior | Not started |
+| **E** | aiortc synthetic video track | WebRTC video / ICE host behavior | **Implemented** |
 | **F** | aiortc synthetic audio + Opus playback | WebRTC audio path | Not started |
 
 ---
@@ -560,13 +560,176 @@ playback.
 
 ---
 
+## Experiment E — synthetic WebRTC video (aiortc)
+
+### Purpose
+
+Prove that aiortc can exchange a **synthetic** VP8 video stream between two
+Windows 11 peers over **host ICE candidates** on the physical LAN (including
+with both VPNs enabled), with offer/answer signaling, ICE/candidate diagnostics,
+frame metrics, and clean shutdown.
+
+This experiment does **not** use DXcam, system audio, Opus, production pairing,
+or the final PySide6 UI. Signaling is **experiment-only** and insecure.
+
+```text
+Experiment-only signaling: no production authentication.
+Use only on your private LAN.
+```
+
+Pipeline:
+
+```text
+SyntheticVideoTrack → aiortc VP8 encode → WebRTC UDP/RTP (host ICE)
+Receiver track.recv() → latest-frame slot → optional OpenCV preview → metrics
+Signaling: HTTP offer/answer on sender --bind-ip (TCP only)
+```
+
+### Setup / dependencies
+
+```powershell
+pip install -e ".[dev,webrtc]"
+```
+
+This installs `aiortc`, `aiohttp`, `av` (PyAV), `opencv-python`, `numpy`, and
+`psutil`.
+
+### Commands
+
+```powershell
+# Printed guide (exact A/B steps)
+python experiments/experiment_e_webrtc_video.py guide
+
+# Sender (Computer A) — bind signaling only to the physical LAN IPv4
+python experiments/experiment_e_webrtc_video.py send `
+  --bind-ip 192.168.1.25 `
+  --port 3848 `
+  --fps 30 `
+  --width 1280 `
+  --height 720 `
+  --duration 120 `
+  --session-name vpn-on-on
+
+# Receiver (Computer B)
+python experiments/experiment_e_webrtc_video.py receive `
+  --remote-ip 192.168.1.25 `
+  --port 3848 `
+  --source-ip 192.168.1.30 `
+  --duration 120 `
+  --session-name vpn-on-on
+
+# Headless metrics / JSON
+python experiments/experiment_e_webrtc_video.py receive `
+  --remote-ip 192.168.1.25 `
+  --port 3848 `
+  --source-ip 192.168.1.30 `
+  --duration 600 `
+  --no-preview `
+  --json
+```
+
+Default port is **3848**. Preview closes on Escape. Ctrl+C and duration
+completion shut down cleanly.
+
+### Both-VPN test instructions
+
+1. Confirm Experiment B `vpn-on-on` TCP reachability first when possible.
+2. On each PC, run Experiment A `list` and note the **physical** LAN IPv4
+   (PREFERRED ethernet/wifi) — not the VPN address.
+3. Enable both VPNs; keep allow-LAN / split-tunnel settings as you intend to use
+   them in production.
+4. Start sender on Computer A with `--bind-ip <A-LAN-IP>`.
+5. Start receiver on Computer B with `--remote-ip <A-LAN-IP>` and
+   `--source-ip <B-LAN-IP>`.
+6. Confirm ICE `connected`/`completed`, visible synthetic video, and that the
+   **selected candidate pair** uses the physical LAN IPs (or that a mismatch
+   warning is printed).
+
+### Reading ICE candidates and the selected pair
+
+On start, both peers print available video codecs. Results JSON include:
+
+| Field | Meaning |
+|---|---|
+| `connection.local_candidates` | Host candidates gathered locally (IP/port/protocol/type + adapter category) |
+| `connection.selected_local_candidate` | Local side of the selected ICE pair |
+| `connection.selected_remote_candidate` | Remote side of the selected ICE pair |
+| `connection.candidate_matches_requested_lan_ip` | Whether selected local IP equals `--bind-ip` / `--source-ip` |
+
+If ICE selects a VPN adapter, Experiment E reports `ICE_SELECTED_WRONG_INTERFACE`
+as a **warning** (connection may still succeed). That is a diagnostic result —
+not a silent success.
+
+### Interpreting network metrics
+
+| Metric | How to read it |
+|---|---|
+| RTT (`current_rtt_ms`) | WebRTC round-trip estimate when available |
+| Jitter | Packet timing variation (ms) |
+| Packets lost | RTP loss from `getStats()` when present |
+| Bitrate | Estimated from stats when present |
+| Received / rendered FPS | Should stay within ~10% of requested under light load |
+
+### Latency caveats
+
+Monotonic clocks on two machines are **not** comparable. Do **not** subtract
+sender `mono_ns` overlays from receiver time for one-way latency. Use:
+
+* WebRTC RTT
+* Frame inter-arrival intervals
+* Rendering delay after reception
+* Optional approximate clock-offset from signaling ping/pong (labeled uncertain)
+* A phone-recorded visual timer for manual glass-to-glass checks
+
+### Firewall / VPN failure symptoms
+
+| Symptom | Likely cause |
+|---|---|
+| `SIGNALING_CONNECTION_FAILED` / timeout | TCP to `--bind-ip:port` blocked; wrong IP; sender not running |
+| `ICE_CONNECTION_FAILED` | UDP/RTP blocked between LAN IPs (firewall or VPN kill-switch) |
+| `ICE_SELECTED_WRONG_INTERFACE` | Connected via VPN/virtual adapter instead of requested LAN IP |
+| `VIDEO_FRAME_TIMEOUT` | ICE looked up but media UDP stalled |
+
+Do **not** disable VPN security to “make it work”. Record the error codes and
+adjust allow-LAN / firewall rules intentionally.
+
+### Pass / fail criteria
+
+1. Synthetic VP8 works locally (two processes).
+2. Synthetic VP8 works between the two target computers.
+3. Works with both VPNs on, **or** diagnostics clearly identify the UDP/ICE block.
+4. ICE states and candidates are recorded; selected pair is visible.
+5. Selected pair uses the intended physical LAN path, or mismatch is reported.
+6. Received FPS within ~10% of requested under light load.
+7. Missing/dropped frames do not cause growing latency (latest-frame slot).
+8. CPU/memory recorded; 10-minute run shows no continuous memory growth.
+9. Ctrl+C, Escape, and duration completion close resources.
+10. `pytest`, Ruff, and mypy pass.
+11. No DXcam / system audio / production pairing / final UI was added here.
+
+### Automated tests
+
+```powershell
+pytest tests/unit/test_synthetic_video.py tests/unit/test_ice_diagnostics.py `
+  tests/unit/test_webrtc_metrics.py tests/unit/test_signaling_e.py `
+  tests/unit/test_codec_preference.py tests/unit/test_remote_video_consumer.py `
+  tests/integration/test_webrtc_video_local.py
+# Optional real two-machine:
+pytest -m network
+```
+
+Normal `pytest` does not require two computers or an interactive preview.
+
+---
+
 ## Execution order
 
 1. **Experiment A** first — foundation for VPN-safe networking.
 2. **Experiment B** next — two-machine reachability before heavy media work.
 3. **Experiment C** — local DXcam viability before WebRTC / Phase 1.
 4. **Experiment D** — local WASAPI loopback viability.
-5. Then **E** and **F** for the remaining Phase 0 go/no-go gate.
+5. **Experiment E** — synthetic WebRTC video / ICE host path.
+6. Then **F** for the remaining Phase 0 go/no-go gate.
 
 ## Go / no-go gate (from PLAN.md)
 

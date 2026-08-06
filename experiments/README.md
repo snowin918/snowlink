@@ -4,29 +4,190 @@ This directory holds **disposable technical-validation scripts** for Phase 0.
 Scripts prove risky dependencies work in isolation on Windows 11 (including with
 VPNs connected) before the full application is built.
 
-**Status:** Harness only — experiments A–F are **not implemented yet**.
+**Status:** Experiment **A** is implemented. Experiments B–F are **not**
+implemented yet.
 
-Do not treat scripts here as production modules. Prefer printed pass/fail output
-and optional metrics JSON. Document VPN failure modes for Experiment B into
-`docs/vpn-lan-access.md` when that experiment is complete.
+Do not treat scripts here as production application architecture. Prefer printed
+pass/fail output and optional metrics JSON. Document VPN failure modes for
+Experiment B into `docs/vpn-lan-access.md` when that experiment is complete
+(not yet).
 
 ## Experiment overview
 
-| ID | Purpose | Demonstrates |
+| ID | Purpose | Demonstrates | Status |
+|---|---|---|---|
+| **A** | Adapter enumeration, classification, and bind-to-selected-IP TCP echo | Physical LAN IPv4 selection; VPN/virtual adapters visible but not preferred; listener bound to the chosen address | **Implemented** |
+| **B** | Two-machine TCP connect with **both VPNs enabled** | Real LAN reachability under VPN; failure modes for allow-LAN / split-tunnel guidance | Not started |
+| **C** | DXcam capture → local preview + FPS/latency counters | Desktop Duplication viability | Not started |
+| **D** | WASAPI loopback → local playback + underrun metrics | System-audio capture | Not started |
+| **E** | aiortc synthetic video track | WebRTC video / ICE host behavior | Not started |
+| **F** | aiortc synthetic audio + Opus playback | WebRTC audio path | Not started |
+
+---
+
+## Experiment A — adapter bind / TCP echo
+
+### Purpose
+
+Prove that Snowlink can:
+
+1. Enumerate active Windows IPv4 adapters with enough metadata to distinguish
+   physical Ethernet/Wi-Fi from VPN, Hyper-V, WSL, Tailscale, and loopback.
+2. Classify adapters (structured Windows `IF_TYPE` / tunnel metadata first;
+   name heuristics second).
+3. Let the operator **manually** select an adapter or IPv4 (VPN adapters are
+   shown, not silently hidden).
+4. Bind a TCP listener **only** to that IPv4 (never `0.0.0.0` by default).
+5. Complete a length-limited UTF-8 echo round-trip as a stand-in for later
+   signaling TCP.
+
+No VPN settings, firewall rules, screen/audio capture, WebRTC, or UI are
+modified or started by this experiment.
+
+### Commands
+
+From the repository root, with the project venv activated and
+`pip install -r requirements-dev.txt` completed:
+
+```powershell
+# List adapters (human-readable)
+python experiments/experiment_a_adapter_bind.py list
+
+# List adapters as JSON
+python experiments/experiment_a_adapter_bind.py list --json
+
+# Serve: bind TCP echo to a specific LAN IPv4 (replace with your address)
+python experiments/experiment_a_adapter_bind.py serve --ip 192.168.1.20 --port 3847
+
+# Serve until Ctrl+C (multiple clients)
+python experiments/experiment_a_adapter_bind.py serve --ip 192.168.1.20 --port 3847 --serve-forever
+
+# Connect / echo from the same machine or the second PC
+python experiments/experiment_a_adapter_bind.py connect --ip 192.168.1.20 --port 3847 --message "snowlink-test"
+
+# JSON result from the client
+python experiments/experiment_a_adapter_bind.py connect --ip 192.168.1.20 --port 3847 --message "snowlink-test" --json
+```
+
+Default port is **3847**. The server prints `getsockname()` after bind.
+
+### Expected output (illustrative)
+
+**`list`**
+
+```text
+Adapters found: 7
+------------------------------------------------------------------------
+[1] Ethernet
+    id:          {XXXXXXXX-...}
+    description: Intel(R) Ethernet Connection
+    status:      up
+    ifType:      6 (ETHERNET_CSMACD)
+    tunnelType:  0 (NONE)
+    speed_bps:   1000000000
+    category:    physical_ethernet  [PREFERRED]  score=...
+    ipv4:        192.168.1.20/24 (private)
+
+[2] Corp VPN
+    ...
+    category:    vpn_or_tunnel  [not-preferred]  score=...
+    ipv4:        10.64.8.12/32 (private)
+
+...
+Auto-selected (preferred): 192.168.1.20 on Ethernet [physical_ethernet]
+```
+
+**`serve`**
+
+```text
+Selected adapter: Ethernet [physical_ethernet]
+Binding TCP echo server to 192.168.1.20:3847
+Listening on 192.168.1.20:3847 (getsockname)
+Waiting for a client (Ctrl+C to stop)...
+Serve OK  bound=192.168.1.20:3847
+```
+
+**`connect`**
+
+```text
+Connect OK  peer=192.168.1.20:3847  echo verified
+Message: 'snowlink-test'  elapsed=2.3 ms
+```
+
+JSON results include `experiment`, `timestamp`, `selected_adapter`,
+`selected_ip`, `requested_port`, `actual_bound_address`, `success`,
+`elapsed_connection_ms`, `error_code`, and `error_message`.
+
+### How to test locally (one PC)
+
+1. Run `list` and confirm your physical Ethernet or Wi-Fi adapter is
+   `PREFERRED` and VPN/virtual adapters are listed as `not-preferred`.
+2. Pick that LAN IPv4.
+3. In terminal A: `serve --ip <lan-ip> --port 3847`
+4. Confirm the printed bound address is exactly `<lan-ip>:3847`.
+5. In terminal B: `connect --ip <lan-ip> --port 3847 --message "snowlink-test"`
+6. Expect exit code 0 and echo verified.
+
+Loopback sanity check (optional):
+
+```powershell
+python experiments/experiment_a_adapter_bind.py serve --ip 127.0.0.1 --port 3847
+python experiments/experiment_a_adapter_bind.py connect --ip 127.0.0.1 --port 3847 --message "loopback"
+```
+
+### How to test between two computers
+
+1. On **PC-A** (sharer stand-in): `list`, note the physical LAN IPv4 (same subnet
+   as PC-B).
+2. On **PC-A**: `serve --ip <pc-a-lan-ip> --port 3847 --serve-forever`
+3. On **PC-B**: `connect --ip <pc-a-lan-ip> --port 3847 --message "snowlink-test"`
+4. Pass: client prints `Connect OK` / `success: true`.
+5. If it fails with timeout/refused while VPNs are on, record the error codes for
+   Experiment B / later `docs/vpn-lan-access.md` — do **not** disable the VPN.
+
+Windows Firewall may prompt on first listen; approve for private networks if you
+intend to test cross-machine. This experiment does not create firewall rules.
+
+### Common errors
+
+| Code / symptom | Likely cause |
+|---|---|
+| `ADDR_NOT_AVAILABLE` | `--ip` is not assigned to a local adapter |
+| `PORT_IN_USE` | Another process is listening on that IP:port |
+| `CONNECTION_REFUSED` | Nothing listening, or firewall reset the SYN |
+| `CONNECTION_TIMEOUT` | Firewall/VPN kill-switch dropping packets; wrong subnet |
+| `MESSAGE_TOO_LARGE` | Payload over 4096 UTF-8 bytes |
+| `SELECTION_FAILED` / no preferred adapter | Only VPN/virtual up — pass `--ip` manually |
+| Enumeration failed on non-Windows | `GetAdaptersAddresses` is Windows-only |
+
+### Pass / fail evidence
+
+| Check | Pass | Fail |
 |---|---|---|
-| **A** | Adapter enumeration, classification, and bind-to-selected-IP TCP echo | Physical LAN IPv4 selection; VPN/virtual adapters excluded by default; listener bound to the chosen address |
-| **B** | Two-machine TCP connect with **both VPNs enabled** | Real LAN reachability under VPN; failure modes for allow-LAN / split-tunnel guidance |
-| **C** | DXcam capture → local PySide6 or OpenCV preview + FPS/latency counters | Desktop Duplication viability and capture cost before WebRTC |
-| **D** | WASAPI loopback → local playback + underrun metrics | System-audio capture (not microphone) and buffer health |
-| **E** | aiortc connection using a **synthetic video** track (same-machine two-process preferred) | WebRTC video path and host-candidate / ICE behavior without real capture |
-| **F** | aiortc connection using a **synthetic audio** track + Opus playback | WebRTC audio path and Opus decode/playback without loopback hardware issues |
+| Adapter list on Windows 11 | Physical NIC identified; VPN/virtual visible and labeled | Crash; adapters missing; silent VPN-only view |
+| Bind | `getsockname()` equals selected IP:port | Bound to `0.0.0.0` or wrong IP |
+| Local echo | Client exit 0, echo matches | Mismatch / nonzero exit |
+| Invalid bind IP | Clear `ADDR_NOT_AVAILABLE` (or equivalent) | Hang / unclear traceback only |
+| Occupied port | Clear `PORT_IN_USE` (or equivalent) | Hang |
+| Automated tests | `pytest`, `ruff check .`, `mypy` pass | Any failing |
+
+### Automated tests
+
+```powershell
+pytest tests/unit/test_adapter_classification.py tests/unit/test_adapter_selection.py tests/integration/test_tcp_echo_local.py
+ruff check .
+mypy
+```
+
+Windows-specific enumeration smoke tests are skipped on non-Windows platforms.
+
+---
 
 ## Execution order
 
 1. **Experiment A** first — foundation for VPN-safe networking.
 2. **Experiment B** next — two-machine reachability before heavy media work.
-3. Then **C** and **E** (video capture + synthetic WebRTC video), and **D** and **F**
-   (loopback + synthetic WebRTC audio), as needed for the Phase 0 go/no-go gate.
+3. Then **C**/**E** and **D**/**F** for the Phase 0 go/no-go gate.
 
 ## Go / no-go gate (from PLAN.md)
 

@@ -79,7 +79,7 @@ mypy
 ```text
 src/snowlink/     Installable application package
 tests/            Automated tests
-experiments/      Phase 0 validation scripts (not implemented yet)
+experiments/      Phase 0 validation scripts (Experiment A implemented)
 docs/adr/         Architecture Decision Records
 docs/runbooks/    Operational runbooks
 scripts/          Dev, packaging, and firewall helpers
@@ -87,6 +87,6 @@ packaging/        PyInstaller / installer artifacts
 config/           Default non-secret configuration
 ```
 
-See `PLAN.md` for the full engineering plan. Phase 0 networking and capture
-experiments are documented under `experiments/README.md` and are not part of
-this skeleton.
+See `PLAN.md` for the full engineering plan. Phase 0 Experiment A (adapter
+enumeration and bind-to-IP TCP echo) lives under `experiments/`; see
+`experiments/README.md`. Experiments B–F are not implemented yet.

@@ -30,6 +30,9 @@ where = ["src"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: local network/socket integration tests",
+]
 
 [tool.ruff]
 line-length = 100

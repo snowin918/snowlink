@@ -1,4 +1,4 @@
-"""View page — connect to a Phase 1 remote screen share."""
+"""View page — connect to a remote screen share (+ system audio)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -19,12 +21,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from snowlink.media.audio_track import AudioPlaybackControls
 from snowlink.ui.workers import AsyncioSessionWorker
 
 
 class ViewPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
+        self._audio_controls = AudioPlaybackControls(muted=False, gain=0.25)
         self._session = AsyncioSessionWorker(self)
         self._session.state_changed.connect(self._on_session_state)
         self._session.frame_ready.connect(self._on_frame)
@@ -40,8 +44,8 @@ class ViewPage(QWidget):
         layout.addWidget(title)
 
         warn = QLabel(
-            "Phase 1 remote screen view (no pairing yet). Enter the sharer's LAN "
-            "IP and signaling port. Use only on your private LAN."
+            "Remote screen + system audio (no pairing yet). Enter the sharer's LAN "
+            "IP and signaling port. Keep playback gain low. Use only on your private LAN."
         )
         warn.setObjectName("warningBanner")
         warn.setWordWrap(True)
@@ -61,6 +65,19 @@ class ViewPage(QWidget):
         self._source_ip = QLineEdit()
         self._source_ip.setPlaceholderText("optional local LAN IPv4")
         form.addRow("Source IP", self._source_ip)
+
+        self._playback_device = QComboBox()
+        self._playback_device.setMinimumWidth(280)
+        form.addRow("Playback device", self._playback_device)
+
+        self._enable_audio = QCheckBox("Play remote system audio")
+        self._enable_audio.setChecked(True)
+        form.addRow("", self._enable_audio)
+
+        self._mute = QCheckBox("Mute")
+        self._mute.setChecked(False)
+        self._mute.toggled.connect(self._on_mute_toggled)
+        form.addRow("", self._mute)
 
         self._code = QLineEdit()
         self._code.setPlaceholderText("6-digit pairing code (Phase 3)")
@@ -93,6 +110,27 @@ class ViewPage(QWidget):
         self._status.setWordWrap(True)
         layout.addWidget(self._status)
 
+        self._refresh_playback_devices()
+
+    def _refresh_playback_devices(self) -> None:
+        self._playback_device.clear()
+        self._playback_device.addItem("default", "default")
+        try:
+            from snowlink.platform_win.audio_endpoints import enumerate_audio_endpoints
+
+            for ep in enumerate_audio_endpoints():
+                if not getattr(ep, "can_playback", False):
+                    continue
+                if getattr(ep, "is_loopback", False):
+                    continue
+                label = f"{ep.index}: {ep.name}"
+                self._playback_device.addItem(label, str(ep.index))
+        except Exception:
+            pass
+
+    def _on_mute_toggled(self, checked: bool) -> None:
+        self._audio_controls.muted = bool(checked)
+
     def _connect(self) -> None:
         if self._session.is_running:
             QMessageBox.warning(self, "Busy", "Already connected or connecting.")
@@ -103,6 +141,10 @@ class ViewPage(QWidget):
             return
         port = int(self._port.value())
         source = self._source_ip.text().strip() or None
+        enable_audio = self._enable_audio.isChecked()
+        playback_device = self._playback_device.currentData() or "default"
+        self._audio_controls.muted = self._mute.isChecked()
+        controls = self._audio_controls
 
         def factory(stop_event: Any, on_state: Any, on_frame: Any) -> Any:
             from snowlink.rtc.screen_session import (
@@ -115,6 +157,12 @@ class ViewPage(QWidget):
                 signaling_port=port,
                 requested_source_ip=source,
                 preview=False,
+                enable_audio=enable_audio,
+                playback=enable_audio,
+                playback_device=str(playback_device),
+                muted=controls.muted,
+                gain=controls.gain,
+                playback_controls=controls,
             )
             return run_screen_view(
                 config,
@@ -134,8 +182,15 @@ class ViewPage(QWidget):
     def _on_session_state(self, state: Any) -> None:
         detail = getattr(state, "detail", "") or getattr(state, "phase", "")
         frames = getattr(state, "frames", 0)
+        audio_frames = getattr(state, "audio_frames", 0)
+        underruns = getattr(state, "audio_underruns", 0)
+        muted = getattr(state, "muted", False)
         phase = getattr(state, "phase", "")
-        self._status.setText(f"[{phase}] {detail} (frames={frames})")
+        mute_s = "muted" if muted else "audio"
+        self._status.setText(
+            f"[{phase}] {detail} (video={frames}, audio={audio_frames}, "
+            f"underruns={underruns}, {mute_s})"
+        )
 
     def _on_frame(self, image: QImage) -> None:
         if image.isNull():

@@ -1,10 +1,11 @@
-"""Share page — local preview + Phase 1 LAN screen share."""
+"""Share page — local preview + LAN screen share (+ system audio)."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -44,8 +45,8 @@ class SharePage(QWidget):
         layout.addWidget(title)
 
         warn = QLabel(
-            "Phase 1 screen share (no pairing yet). HTTP signaling on the selected "
-            "LAN IP — use only on your private LAN. System audio arrives in Phase 2."
+            "Screen + system-audio share (no pairing yet). HTTP signaling on the "
+            "selected LAN IP — use only on your private LAN."
         )
         warn.setObjectName("warningBanner")
         warn.setWordWrap(True)
@@ -60,6 +61,14 @@ class SharePage(QWidget):
 
         self._monitor = QComboBox()
         form.addRow("Monitor", self._monitor)
+
+        self._audio_device = QComboBox()
+        self._audio_device.setMinimumWidth(360)
+        form.addRow("System audio (loopback)", self._audio_device)
+
+        self._enable_audio = QCheckBox("Share system audio")
+        self._enable_audio.setChecked(True)
+        form.addRow("", self._enable_audio)
 
         self._preset = QComboBox()
         self._preset.addItems(list(PRESETS))
@@ -115,6 +124,7 @@ class SharePage(QWidget):
     def refresh_devices(self) -> None:
         self._adapter.clear()
         self._monitor.clear()
+        self._audio_device.clear()
         try:
             from snowlink.platform_win.adapters import enumerate_adapters, is_windows
 
@@ -156,6 +166,18 @@ class SharePage(QWidget):
 
         if self._monitor.count() == 0:
             self._monitor.addItem("0", 0)
+
+        self._audio_device.addItem("default (system output loopback)", "default")
+        try:
+            from snowlink.platform_win.audio_endpoints import enumerate_audio_endpoints
+
+            for ep in enumerate_audio_endpoints():
+                if not getattr(ep, "is_loopback", False) or not getattr(ep, "can_capture", False):
+                    continue
+                label = f"{ep.index}: {ep.name}"
+                self._audio_device.addItem(label, str(ep.index))
+        except Exception as exc:  # noqa: BLE001
+            self._status.setText(f"Audio endpoint list unavailable: {exc}")
 
     def _selected_bind_ip(self) -> str | None:
         adapter = self._adapter.currentData()
@@ -205,6 +227,8 @@ class SharePage(QWidget):
         preset = self._preset.currentText()
         backend = self._backend.currentText()
         port = int(self._port.value())
+        enable_audio = self._enable_audio.isChecked()
+        audio_device = self._audio_device.currentData() or "default"
 
         def factory(stop_event: Any, on_state: Any, _on_frame: Any) -> Any:
             from snowlink.rtc.screen_session import (
@@ -218,6 +242,8 @@ class SharePage(QWidget):
                 monitor=monitor_index,
                 backend=backend,  # type: ignore[arg-type]
                 preset=preset,
+                enable_audio=enable_audio,
+                audio_capture_device=str(audio_device),
             )
             return run_screen_share(config, stop_event=stop_event, on_state=on_state)
 
@@ -226,7 +252,8 @@ class SharePage(QWidget):
             self._share_btn.setEnabled(False)
             self._stop_share_btn.setEnabled(True)
             self._preview_btn.setEnabled(False)
-            self._status.setText(f"Starting share on {bind_ip}:{port}...")
+            media = "screen+audio" if enable_audio else "screen"
+            self._status.setText(f"Starting {media} share on {bind_ip}:{port}...")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Share failed", str(exc))
 
@@ -250,15 +277,17 @@ class SharePage(QWidget):
     def _on_session_state(self, state: Any) -> None:
         detail = getattr(state, "detail", "") or getattr(state, "phase", "")
         frames = getattr(state, "frames", 0)
+        audio_frames = getattr(state, "audio_frames", 0)
         phase = getattr(state, "phase", "")
-        self._status.setText(f"[{phase}] {detail} (frames={frames})")
+        self._status.setText(
+            f"[{phase}] {detail} (video={frames}, audio={audio_frames})"
+        )
 
     def _on_session_finished(self, _state: Any) -> None:
         self._share_btn.setEnabled(True)
         self._stop_share_btn.setEnabled(False)
         self._preview_btn.setEnabled(True)
-        if not self._status.text().startswith("["):
-            self._status.setText("Share stopped.")
+        self._status.setText("Sharing stopped.")
 
     def _on_session_failed(self, message: str) -> None:
         self._share_btn.setEnabled(True)

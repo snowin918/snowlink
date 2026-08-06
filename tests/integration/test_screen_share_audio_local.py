@@ -1,4 +1,4 @@
-"""Integration: local loopback screen share with a fake grabber (no DXcam)."""
+"""Integration: screen share + synthetic Opus audio over local HTTP signaling."""
 
 from __future__ import annotations
 
@@ -15,11 +15,12 @@ from snowlink.rtc.screen_session import (
     run_screen_share,
     run_screen_view,
 )
+from snowlink.rtc.synthetic_audio import SyntheticAudioTrack
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_screen_share_view_local_loopback() -> None:
+async def test_screen_share_view_with_synthetic_audio() -> None:
     pytest.importorskip("aiortc")
     pytest.importorskip("av")
     pytest.importorskip("aiohttp")
@@ -29,7 +30,7 @@ async def test_screen_share_view_local_loopback() -> None:
     def grab() -> np.ndarray:
         frame_seq["n"] += 1
         img = np.zeros((180, 320, 3), dtype=np.uint8)
-        img[:, :, 1] = (frame_seq["n"] * 7) % 255
+        img[:, :, 2] = (frame_seq["n"] * 5) % 255
         return img
 
     capture = ScreenCaptureSession(
@@ -47,7 +48,16 @@ async def test_screen_share_view_local_loopback() -> None:
 
     share_stop = asyncio.Event()
     view_stop = asyncio.Event()
-    port = 19847
+    port = 19857
+
+    audio = SyntheticAudioTrack(
+        sample_rate=48_000,
+        channels=2,
+        frame_ms=20,
+        signal="sine",
+        frequency_hz=440.0,
+        amplitude=0.05,
+    )
 
     share_config = ScreenShareConfiguration(
         bind_ip="127.0.0.1",
@@ -56,14 +66,15 @@ async def test_screen_share_view_local_loopback() -> None:
         height=180,
         fps=15,
         preset="low",
-        enable_audio=False,
+        enable_audio=True,
     )
     view_config = ScreenViewConfiguration(
         remote_ip="127.0.0.1",
         signaling_port=port,
         requested_source_ip="127.0.0.1",
         preview=False,
-        enable_audio=False,
+        enable_audio=True,
+        playback=False,
     )
 
     frames_seen = {"n": 0}
@@ -79,10 +90,10 @@ async def test_screen_share_view_local_loopback() -> None:
             share_config,
             stop_event=share_stop,
             capture_session=capture,
+            audio_track=audio,
         )
 
     async def view_task() -> None:
-        # Give the sharer a moment to bind.
         await asyncio.sleep(0.4)
         await run_screen_view(
             view_config,
@@ -93,15 +104,17 @@ async def test_screen_share_view_local_loopback() -> None:
     try:
         results = await asyncio.wait_for(
             asyncio.gather(share_task(), view_task(), return_exceptions=True),
-            timeout=30.0,
+            timeout=35.0,
         )
     finally:
         share_stop.set()
         view_stop.set()
         capture.shutdown()
+        audio.stop()
 
     for result in results:
         if isinstance(result, Exception):
             raise result
 
     assert frames_seen["n"] >= 5
+    assert audio.frames_generated >= 1

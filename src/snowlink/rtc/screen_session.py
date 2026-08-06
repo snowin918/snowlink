@@ -1,6 +1,7 @@
-"""Phase 1 screen-share session: DXcam → ScreenVideoTrack → HTTP signaling + host ICE.
+"""Screen-share session: DXcam (+ optional WASAPI loopback) → HTTP signaling + host ICE.
 
 Experiment-style HTTP signaling (no pairing). Use only on a private LAN.
+Phase 2 adds system-audio send/receive alongside screen video.
 """
 
 from __future__ import annotations
@@ -12,6 +13,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from snowlink.media.audio_models import (
+    DEFAULT_FRAME_MS,
+    TARGET_CHANNELS,
+    TARGET_SAMPLE_RATE,
+)
+from snowlink.media.audio_track import AudioPlaybackControls, LoopbackAudioTrack, ShareAudioCapture
 from snowlink.media.capture_models import (
     DEFAULT_PRESET,
     CaptureConfiguration,
@@ -24,11 +31,18 @@ from snowlink.net.adapter_models import NetworkAdapter
 from snowlink.net.adapter_selection import select_preferred_endpoint
 from snowlink.net.tcp_diagnostics import validate_ipv4
 from snowlink.platform_win.adapters import enumerate_adapters, is_windows
+from snowlink.rtc.audio_receiver import PlaybackWorker, RemoteAudioConsumer
 from snowlink.rtc.errors import WebRTCError, failure_for, format_failure_human, map_exception
-from snowlink.rtc.models import TimeoutConfig
+from snowlink.rtc.models import (
+    DEFAULT_AUDIO_GAIN,
+    DEFAULT_BUFFER_TARGET_MS,
+    TimeoutConfig,
+)
 from snowlink.rtc.peer_connection import (
+    assert_opus_available,
     assert_preferred_video_codec_available,
     create_peer_connection,
+    prefer_audio_codec,
     prefer_video_codec,
     require_aiortc,
     wait_ice_connected,
@@ -45,7 +59,7 @@ DEFAULT_SIGNALING_PORT = 3847
 
 @dataclass(frozen=True, slots=True)
 class ScreenShareConfiguration:
-    """Share-side configuration for Phase 1 screen streaming."""
+    """Share-side configuration for screen (+ optional system audio) streaming."""
 
     bind_ip: str
     signaling_port: int = DEFAULT_SIGNALING_PORT
@@ -56,6 +70,11 @@ class ScreenShareConfiguration:
     height: int = DEFAULT_PRESET.height
     fps: int = DEFAULT_PRESET.fps
     allow_h264_fallback: bool = False
+    enable_audio: bool = True
+    audio_capture_device: str = "default"
+    audio_sample_rate: int = TARGET_SAMPLE_RATE
+    audio_channels: int = TARGET_CHANNELS
+    audio_frame_ms: int = DEFAULT_FRAME_MS
     timeouts: TimeoutConfig = field(default_factory=TimeoutConfig)
 
     @classmethod
@@ -68,6 +87,8 @@ class ScreenShareConfiguration:
         backend: Literal["dxgi", "winrt"] = "dxgi",
         preset: str = "low",
         allow_h264_fallback: bool = False,
+        enable_audio: bool = True,
+        audio_capture_device: str = "default",
     ) -> ScreenShareConfiguration:
         resolved = resolve_preset(preset)
         return cls(
@@ -80,6 +101,8 @@ class ScreenShareConfiguration:
             height=resolved.height,
             fps=resolved.fps,
             allow_h264_fallback=allow_h264_fallback,
+            enable_audio=enable_audio,
+            audio_capture_device=audio_capture_device,
         )
 
     def capture_config(self) -> CaptureConfiguration:
@@ -97,13 +120,20 @@ class ScreenShareConfiguration:
 
 @dataclass(frozen=True, slots=True)
 class ScreenViewConfiguration:
-    """View-side configuration for Phase 1 screen streaming."""
+    """View-side configuration for screen (+ optional system audio) streaming."""
 
     remote_ip: str
     signaling_port: int = DEFAULT_SIGNALING_PORT
     requested_source_ip: str | None = None
     preview: bool = True
     allow_h264_fallback: bool = False
+    enable_audio: bool = True
+    playback: bool = True
+    playback_device: str = "default"
+    muted: bool = False
+    gain: float = DEFAULT_AUDIO_GAIN
+    buffer_target_ms: int = DEFAULT_BUFFER_TARGET_MS
+    playback_controls: AudioPlaybackControls | None = None
     timeouts: TimeoutConfig = field(default_factory=TimeoutConfig)
 
 
@@ -119,6 +149,9 @@ class ScreenSessionState:
     port: int | None = None
     ice_state: str | None = None
     frames: int = 0
+    audio_frames: int = 0
+    audio_underruns: int = 0
+    muted: bool = False
     error: str | None = None
 
 
@@ -150,8 +183,10 @@ async def run_screen_share(
     on_state: StateCallback | None = None,
     capture_session: ScreenCaptureSession | None = None,
     grabber: Callable[[], Any] | None = None,
+    audio_track: Any | None = None,
+    audio_capture: ShareAudioCapture | None = None,
 ) -> ScreenSessionState:
-    """Bind HTTP signaling, start DXcam, and answer viewer offers with screen video."""
+    """Bind HTTP signaling, start DXcam (+ optional loopback), answer viewer offers."""
     require_aiortc()
     from aiortc import RTCSessionDescription
 
@@ -168,8 +203,11 @@ async def run_screen_share(
     _notify(on_state, state)
 
     owns_capture = capture_session is None
+    owns_audio = audio_capture is None and audio_track is None
     capture = capture_session
     track: ScreenVideoTrack | None = None
+    a_track: Any | None = audio_track
+    audio_src: ShareAudioCapture | None = audio_capture
     pc: Any | None = None
     server: SignalingServer | None = None
     media_started = asyncio.Event()
@@ -179,6 +217,8 @@ async def run_screen_share(
             prefer="video/VP8",
             allow_h264_fallback=config.allow_h264_fallback,
         )
+        if config.enable_audio and a_track is None:
+            assert_opus_available()
 
         if capture is None:
             capture = ScreenCaptureSession(
@@ -195,6 +235,16 @@ async def run_screen_share(
             scale=True,
             session_epoch_ns=time.perf_counter_ns(),
         )
+
+        if config.enable_audio and a_track is None:
+            if audio_src is None:
+                audio_src = ShareAudioCapture.start(
+                    capture_device=config.audio_capture_device,
+                    sample_rate=config.audio_sample_rate,
+                    channels=config.audio_channels,
+                    frame_ms=config.audio_frame_ms,
+                )
+            a_track = LoopbackAudioTrack(audio_src)
 
         async def handle_offer(payload: dict[str, Any]) -> dict[str, Any]:
             nonlocal pc
@@ -223,6 +273,9 @@ async def run_screen_share(
                 prefer="video/VP8",
                 allow_h264_fallback=config.allow_h264_fallback,
             )
+            if a_track is not None:
+                pc.addTrack(a_track)
+                prefer_audio_codec(pc)
             offer = RTCSessionDescription(sdp=str(payload["sdp"]), type=str(payload["type"]))
             await pc.setRemoteDescription(offer)
             answer = await pc.createAnswer()
@@ -242,9 +295,10 @@ async def run_screen_share(
         )
         await server.start()
         state.phase = "waiting_for_viewer"
+        media_note = "screen+audio" if a_track is not None else "screen"
         state.detail = (
             f"Listening on http://{config.bind_ip}:{config.signaling_port}/ — "
-            "waiting for viewer"
+            f"waiting for viewer ({media_note})"
         )
         _notify(on_state, state)
         print(SIGNALING_WARNING)
@@ -266,7 +320,10 @@ async def run_screen_share(
         await wait_ice_connected(pc, timeout_s=config.timeouts.ice_connection_s)
         state.phase = "sharing"
         state.ice_state = str(pc.iceConnectionState)
-        state.detail = f"ICE {pc.iceConnectionState}; streaming screen"
+        state.detail = (
+            f"ICE {pc.iceConnectionState}; streaming "
+            f"{'screen+audio' if a_track is not None else 'screen'}"
+        )
         _notify(on_state, state)
         print(state.detail)
 
@@ -282,6 +339,8 @@ async def run_screen_share(
             if pc.connectionState in {"closed", "disconnected"}:
                 break
             state.frames = track.frames_generated if track else 0
+            if a_track is not None:
+                state.audio_frames = int(getattr(a_track, "frames_generated", 0) or 0)
             state.ice_state = str(pc.iceConnectionState)
             _notify(on_state, state)
             try:
@@ -311,6 +370,11 @@ async def run_screen_share(
         stop.set()
         if track is not None:
             track.stop()
+        if a_track is not None:
+            try:
+                a_track.stop()
+            except Exception:
+                pass
         if pc is not None:
             try:
                 await asyncio.wait_for(pc.close(), timeout=config.timeouts.shutdown_s)
@@ -320,6 +384,8 @@ async def run_screen_share(
             await server.close()
         if owns_capture and capture is not None:
             capture.shutdown()
+        if owns_audio and audio_src is not None:
+            audio_src.shutdown()
         if state.phase not in {"failed"}:
             state.phase = "stopped"
             state.detail = "Share stopped"
@@ -336,7 +402,7 @@ async def run_screen_view(
     on_frame: Callable[[Any], None] | None = None,
     preview_window_name: str = "Snowlink View",
 ) -> ScreenSessionState:
-    """Connect to a sharer, receive screen video, optionally preview / emit frames."""
+    """Connect to a sharer, receive screen video (+ optional system audio)."""
     require_aiortc()
     from aiortc import RTCSessionDescription
 
@@ -355,11 +421,16 @@ async def run_screen_view(
         validate_local_ip(config.requested_source_ip, adapters)
 
     stop = stop_event or asyncio.Event()
+    controls = config.playback_controls or AudioPlaybackControls(
+        muted=config.muted,
+        gain=config.gain,
+    )
     state = ScreenSessionState(
         role="view",
         phase="connecting",
         remote_ip=config.remote_ip,
         port=config.signaling_port,
+        muted=controls.muted,
         detail=SIGNALING_WARNING,
     )
     _notify(on_state, state)
@@ -367,11 +438,17 @@ async def run_screen_view(
     pc: Any | None = None
     client: SignalingClient | None = None
     consumer: RemoteVideoConsumer | None = None
+    audio_consumer: RemoteAudioConsumer | None = None
+    playback_worker: PlaybackWorker | None = None
+    player: Any | None = None
     preview_task: asyncio.Future[int] | None = None
     frame_task: asyncio.Task[None] | None = None
     preview_stop = asyncio.Event()
 
     try:
+        if config.enable_audio:
+            assert_opus_available()
+
         client = SignalingClient(
             remote_ip=config.remote_ip,
             port=config.signaling_port,
@@ -386,12 +463,17 @@ async def run_screen_view(
 
         pc = create_peer_connection()
         track_ready = asyncio.Event()
+        audio_ready = asyncio.Event()
         remote_track_box: list[Any] = []
+        remote_audio_box: list[Any] = []
 
         def _on_track(track: Any) -> None:
             if track.kind == "video":
                 remote_track_box.append(track)
                 track_ready.set()
+            elif track.kind == "audio" and config.enable_audio:
+                remote_audio_box.append(track)
+                audio_ready.set()
 
         def _on_conn() -> None:
             if pc is not None and pc.connectionState in {
@@ -409,6 +491,9 @@ async def run_screen_view(
             prefer="video/VP8",
             allow_h264_fallback=config.allow_h264_fallback,
         )
+        if config.enable_audio:
+            pc.addTransceiver("audio", direction="recvonly")
+            prefer_audio_codec(pc)
 
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
@@ -444,6 +529,57 @@ async def run_screen_view(
         consumer = RemoteVideoConsumer()
         await consumer.start(remote_track_box[0])
 
+        if config.enable_audio:
+            # Audio track may arrive slightly after video; wait briefly.
+            if not remote_audio_box:
+                try:
+                    await asyncio.wait_for(audio_ready.wait(), timeout=2.0)
+                except TimeoutError:
+                    pass
+            if remote_audio_box:
+                audio_consumer = RemoteAudioConsumer(
+                    sample_rate=TARGET_SAMPLE_RATE,
+                    channels=TARGET_CHANNELS,
+                    frame_ms=DEFAULT_FRAME_MS,
+                    buffer_target_ms=config.buffer_target_ms,
+                )
+                await audio_consumer.start(remote_audio_box[0])
+                if config.playback:
+                    from snowlink.media.audio_format import float32_to_s16, samples_per_frame
+                    from snowlink.media.audio_playback import AudioPlayer
+                    from snowlink.platform_win.audio_endpoints import resolve_playback_device
+
+                    endpoint = resolve_playback_device(config.playback_device)
+                    frame_samples = samples_per_frame(TARGET_SAMPLE_RATE, DEFAULT_FRAME_MS)
+                    player = AudioPlayer(
+                        endpoint,
+                        sample_rate=TARGET_SAMPLE_RATE,
+                        channels=TARGET_CHANNELS,
+                        frames_per_buffer=frame_samples,
+                    )
+                    player.open()
+                    player.start()
+
+                    def _write(pcm: Any) -> None:
+                        assert player is not None
+                        player.write_s16(float32_to_s16(pcm))
+
+                    playback_worker = PlaybackWorker(
+                        audio_consumer.ring,
+                        sample_rate=TARGET_SAMPLE_RATE,
+                        channels=TARGET_CHANNELS,
+                        frame_ms=DEFAULT_FRAME_MS,
+                        gain=controls.gain,
+                        muted=controls.muted,
+                        write_pcm=_write,
+                        enabled=True,
+                        controls=controls,
+                    )
+                    playback_worker.start()
+            else:
+                # Offer may omit audio (older sharer); continue video-only.
+                state.detail = "Receiving remote screen (no remote audio track)"
+
         deadline = time.perf_counter() + config.timeouts.first_frame_s
         while consumer.first_frame_at_ns is None:
             if time.perf_counter() > deadline:
@@ -459,7 +595,10 @@ async def run_screen_view(
             await asyncio.sleep(0.05)
 
         state.phase = "viewing"
-        state.detail = "Receiving remote screen"
+        if audio_consumer is not None:
+            state.detail = "Receiving remote screen + system audio"
+        else:
+            state.detail = "Receiving remote screen"
         _notify(on_state, state)
         print(state.detail)
 
@@ -506,6 +645,11 @@ async def run_screen_view(
             if pc.connectionState in {"closed", "disconnected"}:
                 break
             state.frames = consumer.frames_received if consumer else 0
+            if audio_consumer is not None:
+                state.audio_frames = audio_consumer.frames_received
+            if playback_worker is not None:
+                state.audio_underruns = playback_worker.underruns
+            state.muted = controls.muted
             state.ice_state = str(pc.iceConnectionState)
             _notify(on_state, state)
             try:
@@ -540,6 +684,15 @@ async def run_screen_view(
                 await frame_task
             except (asyncio.CancelledError, Exception):
                 pass
+        if playback_worker is not None:
+            playback_worker.stop()
+        if player is not None:
+            try:
+                player.close()
+            except Exception:
+                pass
+        if audio_consumer is not None:
+            await audio_consumer.stop()
         if consumer is not None:
             await consumer.stop()
         if preview_task is not None:

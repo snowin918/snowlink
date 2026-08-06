@@ -2,8 +2,8 @@
 
 Private LAN screen and system-audio share for Windows 11 (exactly two peers).
 
-**Phase 1 screen-only demo:** Share / View over LAN (HTTP signaling, no pairing).
-System audio and pairing codes are not ready yet (Phase 2 / 3). Phase 0 gate is
+**Phase 2 demo:** Share / View over LAN with **screen + system audio** (HTTP
+signaling, no pairing yet). Pairing codes arrive in Phase 3. Phase 0 gate is
 `GO` with constraints — see `docs/phase-0-go-no-go.md` (default capture preset
 is **Low** because Balanced may miss ~30 FPS on software capture).
 
@@ -42,7 +42,7 @@ python -m pip install --upgrade pip setuptools wheel
 # Install the project with development tools
 pip install -r requirements-dev.txt
 
-# App shell + Phase 0/1 extras (recommended on a lab PC)
+# App shell + Phase 0/2 extras (recommended on a lab PC)
 pip install -e ".[dev,ui,capture,audio,webrtc]"
 ```
 
@@ -55,7 +55,7 @@ pip install -r requirements.txt
 ## Run the GUI
 
 ```powershell
-pip install -e ".[ui,capture,webrtc]"
+pip install -e ".[ui,capture,audio,webrtc]"
 python -m snowlink
 ```
 
@@ -64,33 +64,36 @@ Or use the console script after editable install: `snowlink`.
 **Works now**
 
 - Home / Share / View / Diagnostics navigation
-- **Share:** Start Sharing / Stop (DXcam → WebRTC VP8 on selected LAN IP)
-- **View:** Connect / Disconnect (remote screen in the View page)
+- **Share:** Start Sharing / Stop (DXcam → VP8 + WASAPI loopback → Opus on selected LAN IP)
+- **View:** Connect / Disconnect (remote screen + system audio; Mute toggle)
 - Share: local Experiment C preview still available
 - Diagnostics: run Phase 0 Experiments **A–F**
 
 **Not ready yet**
 
 - Pairing codes / product WebSocket signaling (Phase 3)
-- System audio over the share (Phase 2)
 - Full stats panel / Settings
 
 ### Two-PC GUI checklist (vpn-on-on)
 
 1. Enable VPN on both PCs; enable Allow LAN / split-tunnel if needed (`docs/vpn-lan-access.md`).
-2. On each PC: `pip install -e ".[ui,capture,webrtc]"` then `python -m snowlink`.
-3. Share: pick physical LAN adapter + monitor + preset (default **low**) → Start Sharing.
-4. View: enter sharer LAN IP + port (default 3847) → Connect → confirm remote screen.
+2. On each PC: `pip install -e ".[ui,capture,audio,webrtc]"` then `python -m snowlink`.
+3. Share: pick physical LAN adapter + monitor + loopback device + preset (default **low**) → Start Sharing.
+4. View: enter sharer LAN IP + port (default 3847) → Connect → confirm remote screen + audio (keep gain low).
 5. Stop Sharing / Disconnect on both sides.
 
-## Phase 1 CLI (no GUI)
+## Phase 2 CLI (no GUI)
 
 ```powershell
 # Sharer (bind to physical LAN IPv4)
 python -m snowlink share --bind-ip 192.168.1.25 --port 3847 --preset low
 
-# Viewer
+# Viewer (keep default gain 0.25; add --muted to start muted)
 python -m snowlink view --remote-ip 192.168.1.25 --port 3847
+
+# Video-only
+python -m snowlink share --bind-ip 192.168.1.25 --no-audio
+python -m snowlink view --remote-ip 192.168.1.25 --no-audio
 ```
 
 ## Build the GUI app (windowed)

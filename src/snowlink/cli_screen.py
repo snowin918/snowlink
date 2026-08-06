@@ -1,4 +1,4 @@
-"""CLI for Phase 1 screen-only share / view (HTTP signaling + DXcam)."""
+"""CLI for screen share / view (HTTP signaling + DXcam + optional system audio)."""
 
 from __future__ import annotations
 
@@ -12,11 +12,11 @@ from typing import Any
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Snowlink Phase 1 screen share / view (no pairing yet)",
+        description="Snowlink screen share / view (HTTP signaling; pairing arrives in Phase 3)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    share = sub.add_parser("share", help="Share this computer's screen")
+    share = sub.add_parser("share", help="Share this computer's screen (+ system audio)")
     share.add_argument("--bind-ip", default=None, help="LAN IPv4 to bind (default: auto)")
     share.add_argument("--port", type=int, default=3847)
     share.add_argument("--monitor", type=int, default=0)
@@ -26,6 +26,16 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("low", "balanced", "high"),
         default="low",
         help="Quality preset (default low — Balanced may miss 30 FPS on software path)",
+    )
+    share.add_argument(
+        "--no-audio",
+        action="store_true",
+        help="Disable WASAPI loopback / Opus audio (video only)",
+    )
+    share.add_argument(
+        "--audio-device",
+        default="default",
+        help="Loopback capture device selector (default / index / substring)",
     )
     share.add_argument(
         "--duration",
@@ -39,6 +49,28 @@ def _build_parser() -> argparse.ArgumentParser:
     view.add_argument("--port", type=int, default=3847)
     view.add_argument("--source-ip", default=None, help="Optional local bind for signaling")
     view.add_argument("--no-preview", action="store_true")
+    view.add_argument(
+        "--no-audio",
+        action="store_true",
+        help="Do not request / play remote system audio",
+    )
+    view.add_argument(
+        "--no-playback",
+        action="store_true",
+        help="Receive audio into metrics buffers but do not open speakers",
+    )
+    view.add_argument(
+        "--playback-device",
+        default="default",
+        help="Playback device selector (default / index / substring)",
+    )
+    view.add_argument("--muted", action="store_true", help="Start with received audio muted")
+    view.add_argument(
+        "--gain",
+        type=float,
+        default=0.25,
+        help="Playback gain 0.0–1.0 (default 0.25; keep low)",
+    )
     view.add_argument(
         "--duration",
         type=float,
@@ -66,6 +98,8 @@ async def _run_share(args: argparse.Namespace) -> int:
         monitor=args.monitor,
         backend=args.backend,
         preset=args.preset,
+        enable_audio=not args.no_audio,
+        audio_capture_device=args.audio_device,
     )
     stop = asyncio.Event()
 
@@ -105,6 +139,11 @@ async def _run_view(args: argparse.Namespace) -> int:
         signaling_port=args.port,
         requested_source_ip=args.source_ip,
         preview=not args.no_preview,
+        enable_audio=not args.no_audio,
+        playback=not args.no_playback,
+        playback_device=args.playback_device,
+        muted=bool(args.muted),
+        gain=float(args.gain),
     )
     stop = asyncio.Event()
 

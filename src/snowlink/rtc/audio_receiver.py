@@ -296,6 +296,7 @@ class PlaybackWorker:
         muted: bool = False,
         write_pcm: Callable[[NDArray[np.float32]], None] | None = None,
         enabled: bool = True,
+        controls: Any | None = None,
     ) -> None:
         self.ring = ring
         self.sample_rate = int(sample_rate)
@@ -304,6 +305,7 @@ class PlaybackWorker:
         self.frame_duration_s = self.frame_samples / float(sample_rate)
         self.gain = float(gain)
         self.muted = bool(muted)
+        self.controls = controls
         self.write_pcm = write_pcm
         self.enabled = bool(enabled)
         self.samples_played = 0
@@ -353,7 +355,9 @@ class PlaybackWorker:
                 if underrun:
                     self.underruns += 1
                     self.silence_samples_inserted += self.frame_samples
-                pcm = apply_gain(data, self.gain, muted=self.muted or not self.enabled)
+                gain = float(getattr(self.controls, "gain", self.gain))
+                muted = bool(getattr(self.controls, "muted", self.muted))
+                pcm = apply_gain(data, gain, muted=muted or not self.enabled)
                 if self.enabled and self.write_pcm is not None:
                     self.write_pcm(pcm)
                 self.samples_played += self.frame_samples

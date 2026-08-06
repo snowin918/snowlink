@@ -21,15 +21,16 @@ class HomePage(QWidget):
 
         subtitle = QLabel(
             "Private LAN screen and system-audio share for Windows 11.\n"
-            "Phase 1: screen-only Share / View over LAN (pairing and audio later)."
+            "Phase 2: Share / View with screen + system audio (pairing in Phase 3)."
         )
         subtitle.setObjectName("brandSubtitle")
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
         warn = QLabel(
-            "Screen Share/View works without pairing codes yet — use only on a "
-            "trusted private LAN. Diagnostics still runs Phase 0 Experiments A–F."
+            "Share/View works without pairing codes yet — use only on a trusted "
+            "private LAN. Keep viewer playback gain low. Diagnostics still runs "
+            "Phase 0 Experiments A–F."
         )
         warn.setObjectName("warningBanner")
         warn.setWordWrap(True)

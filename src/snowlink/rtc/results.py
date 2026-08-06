@@ -1,4 +1,4 @@
-"""Persist Experiment E JSON result files."""
+"""Persist Experiment E/F JSON result files."""
 
 from __future__ import annotations
 
@@ -6,8 +6,17 @@ import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, Protocol
 
 from snowlink.rtc.models import ExperimentEResult
+
+
+class _ResultLike(Protocol):
+    role: str
+    session_name: str
+
+    def to_dict(self) -> dict[str, Any]: ...
+
 
 _UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -37,7 +46,7 @@ def result_filename(
 
 
 def write_result(
-    result: ExperimentEResult,
+    result: _ResultLike,
     results_dir: Path,
     *,
     filename: str | None = None,

@@ -1,4 +1,4 @@
-"""aiortc peer-connection helpers for Experiment E (host ICE, VP8 preference)."""
+"""aiortc peer-connection helpers (host ICE, VP8 / Opus preference)."""
 
 from __future__ import annotations
 
@@ -42,10 +42,19 @@ def create_peer_connection() -> Any:
 
 def list_video_codecs() -> list[AvailableCodec]:
     """Return available video codecs from aiortc sender capabilities."""
+    return _list_codecs("video")
+
+
+def list_audio_codecs() -> list[AvailableCodec]:
+    """Return available audio codecs from aiortc sender capabilities."""
+    return _list_codecs("audio")
+
+
+def _list_codecs(kind: str) -> list[AvailableCodec]:
     require_aiortc()
     from aiortc import RTCRtpSender
 
-    caps = RTCRtpSender.getCapabilities("video")
+    caps = RTCRtpSender.getCapabilities(kind)
     codecs: list[AvailableCodec] = []
     for codec in caps.codecs:
         codecs.append(
@@ -139,6 +148,58 @@ def prefer_video_codec(
                     failure_for(
                         "UNEXPECTED_WEBRTC_ERROR",
                         "Failed to set video codec preferences.",
+                        exception=exc,
+                    )
+                ) from exc
+    return selected
+
+
+def assert_opus_available(*, prefer: str = "audio/opus") -> str:
+    """Validate Opus availability without mutating a peer connection."""
+    require_aiortc()
+    from aiortc import RTCRtpSender
+
+    caps = RTCRtpSender.getCapabilities("audio")
+    all_codecs = list(caps.codecs)
+    available = [str(getattr(c, "mimeType", "")) for c in all_codecs]
+    preferred = [c for c in all_codecs if _mime_is(c, prefer)]
+    if not preferred:
+        raise WebRTCError(
+            failure_for(
+                "OPUS_UNAVAILABLE",
+                "Opus codec is not available.",
+                likely_cause=(
+                    "aiortc/PyAV did not advertise audio/opus. "
+                    f"Available: {', '.join(available) or '(none)'}"
+                ),
+            )
+        )
+    return "opus"
+
+
+def prefer_audio_codec(pc: Any, *, prefer: str = "audio/opus") -> str:
+    """Prefer Opus on all audio transceivers.
+
+    Returns ``opus``. Raises :class:`WebRTCError` with ``OPUS_UNAVAILABLE`` when
+    Opus is missing. Does not silently fall back to PCMU/PCMA.
+    """
+    require_aiortc()
+    from aiortc import RTCRtpSender
+
+    selected = assert_opus_available(prefer=prefer)
+    caps = RTCRtpSender.getCapabilities("audio")
+    all_codecs = list(caps.codecs)
+    preferred = [c for c in all_codecs if _mime_is(c, prefer)]
+    ordered = preferred + [c for c in all_codecs if c not in preferred]
+    for transceiver in pc.getTransceivers():
+        if getattr(transceiver, "kind", None) == "audio":
+            try:
+                transceiver.setCodecPreferences(ordered)
+            except Exception as exc:
+                raise WebRTCError(
+                    failure_for(
+                        "UNEXPECTED_WEBRTC_AUDIO_ERROR",
+                        "Failed to set audio codec preferences.",
                         exception=exc,
                     )
                 ) from exc

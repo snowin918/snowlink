@@ -163,6 +163,7 @@ def _as_float(value: Any) -> float | None:
 class ParsedRtcStats:
     network: NetworkStats
     video: VideoStats
+    audio: dict[str, Any] = field(default_factory=dict)
     codec_name: str | None = None
     codec_payload_type: int | None = None
     selected_pair_id: str | None = None
@@ -179,9 +180,10 @@ def parse_rtc_stats_report(report: Any) -> ParsedRtcStats:
     """
     network = NetworkStats()
     video = VideoStats()
+    audio: dict[str, Any] = {}
     items: list[Any]
     if report is None:
-        return ParsedRtcStats(network=network, video=video)
+        return ParsedRtcStats(network=network, video=video, audio=audio)
     if isinstance(report, dict):
         items = list(report.values())
     else:
@@ -209,19 +211,29 @@ def parse_rtc_stats_report(report: Any) -> ParsedRtcStats:
 
     for item in items:
         typ = str(_stat_get(item, "type") or "").lower()
+        kind = str(_stat_get(item, "kind", "mediaType", "media_type") or "").lower()
         if typ in {"outbound-rtp", "outboundrtp"}:
             network.bytes_sent = _as_int(_stat_get(item, "bytesSent", "bytes_sent"))
             network.packets_sent = _as_int(_stat_get(item, "packetsSent", "packets_sent"))
-            video.frames_encoded = _as_int(
-                _stat_get(item, "framesEncoded", "frames_encoded")
-            )
-            video.frames_sent = _as_int(_stat_get(item, "framesSent", "frames_sent"))
-            video.key_frames = _as_int(_stat_get(item, "keyFramesEncoded", "key_frames"))
-            video.width = _as_int(_stat_get(item, "frameWidth", "frame_width")) or video.width
-            video.height = _as_int(_stat_get(item, "frameHeight", "frame_height")) or video.height
+            if kind != "audio":
+                video.frames_encoded = _as_int(
+                    _stat_get(item, "framesEncoded", "frames_encoded")
+                )
+                video.frames_sent = _as_int(_stat_get(item, "framesSent", "frames_sent"))
+                video.key_frames = _as_int(
+                    _stat_get(item, "keyFramesEncoded", "key_frames")
+                )
+                video.width = (
+                    _as_int(_stat_get(item, "frameWidth", "frame_width")) or video.width
+                )
+                video.height = (
+                    _as_int(_stat_get(item, "frameHeight", "frame_height")) or video.height
+                )
             br = _as_float(_stat_get(item, "targetBitrate", "bytesSent"))
             if br is not None and _stat_get(item, "targetBitrate") is not None:
                 network.estimated_bitrate_bps = br
+            if kind == "audio":
+                _merge_audio_stats(audio, item)
         elif typ in {"inbound-rtp", "inboundrtp"}:
             network.bytes_received = _as_int(
                 _stat_get(item, "bytesReceived", "bytes_received")
@@ -234,18 +246,25 @@ def parse_rtc_stats_report(report: Any) -> ParsedRtcStats:
             if jitter is not None:
                 # WebRTC jitter is in seconds for RTP; convert to ms when small.
                 network.jitter_ms = jitter * 1000.0 if jitter < 10 else jitter
-            video.frames_decoded = _as_int(
-                _stat_get(item, "framesDecoded", "frames_decoded")
-            )
-            video.frames_received = int(
-                _as_int(_stat_get(item, "framesReceived", "frames_received"))
-                or video.frames_received
-            )
-            video.frames_dropped = _as_int(
-                _stat_get(item, "framesDropped", "frames_dropped")
-            )
-            video.width = _as_int(_stat_get(item, "frameWidth", "frame_width")) or video.width
-            video.height = _as_int(_stat_get(item, "frameHeight", "frame_height")) or video.height
+            if kind == "audio":
+                _merge_audio_stats(audio, item)
+            else:
+                video.frames_decoded = _as_int(
+                    _stat_get(item, "framesDecoded", "frames_decoded")
+                )
+                video.frames_received = int(
+                    _as_int(_stat_get(item, "framesReceived", "frames_received"))
+                    or video.frames_received
+                )
+                video.frames_dropped = _as_int(
+                    _stat_get(item, "framesDropped", "frames_dropped")
+                )
+                video.width = (
+                    _as_int(_stat_get(item, "frameWidth", "frame_width")) or video.width
+                )
+                video.height = (
+                    _as_int(_stat_get(item, "frameHeight", "frame_height")) or video.height
+                )
         elif typ in {"remote-inbound-rtp", "remoteinboundrtp"}:
             rtt = _as_float(_stat_get(item, "roundTripTime", "totalRoundTripTime"))
             if rtt is not None:
@@ -292,10 +311,13 @@ def parse_rtc_stats_report(report: Any) -> ParsedRtcStats:
     if codec_name:
         video.codec = codec_name
         video.codec_payload_type = codec_payload_type
+        audio["codec"] = codec_name
+        audio["codec_payload_type"] = codec_payload_type
 
     return ParsedRtcStats(
         network=network,
         video=video,
+        audio=audio,
         codec_name=codec_name,
         codec_payload_type=codec_payload_type,
         selected_pair_id=selected_pair_id,
@@ -304,6 +326,45 @@ def parse_rtc_stats_report(report: Any) -> ParsedRtcStats:
         raw_candidates=raw_candidates,
         raw_pairs=raw_pairs,
     )
+
+
+def _merge_audio_stats(audio: dict[str, Any], item: Any) -> None:
+    mapping = {
+        "audio_level": ("audioLevel", "audio_level"),
+        "total_audio_energy": ("totalAudioEnergy", "total_audio_energy"),
+        "concealed_samples": ("concealedSamples", "concealed_samples"),
+        "silent_concealed_samples": (
+            "silentConcealedSamples",
+            "silent_concealed_samples",
+        ),
+        "concealment_events": ("concealmentEvents", "concealment_events"),
+        "jitter_buffer_emitted_count": (
+            "jitterBufferEmittedCount",
+            "jitter_buffer_emitted_count",
+        ),
+    }
+    for key, names in mapping.items():
+        value = _stat_get(item, *names)
+        if value is None:
+            continue
+        if key in {
+            "concealed_samples",
+            "silent_concealed_samples",
+            "concealment_events",
+            "jitter_buffer_emitted_count",
+        }:
+            audio[key] = _as_int(value)
+        else:
+            audio[key] = _as_float(value)
+    delay = _as_float(_stat_get(item, "jitterBufferDelay", "jitter_buffer_delay"))
+    emitted = _as_int(
+        _stat_get(item, "jitterBufferEmittedCount", "jitter_buffer_emitted_count")
+    )
+    if delay is not None and emitted is not None and emitted > 0:
+        # delay is total seconds; convert average to ms.
+        audio["jitter_buffer_delay_ms"] = (delay / float(emitted)) * 1000.0
+    elif delay is not None:
+        audio["jitter_buffer_delay_ms"] = delay * 1000.0 if delay < 10 else delay
 
 
 def estimate_clock_offset_ms(

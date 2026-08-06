@@ -6,8 +6,7 @@ VPNs connected) before the full application is built.
 
 ## Status
 
-Experiments **A**, **B**, **C**, **D**, and **E** are implemented.
-Experiment F is **not** implemented yet.
+Experiments **A**, **B**, **C**, **D**, **E**, and **F** are implemented.
 
 Do not treat scripts here as production application architecture. Prefer printed
 pass/fail output and optional metrics JSON. VPN / LAN failure guidance from
@@ -22,7 +21,7 @@ Experiment B lives in `docs/vpn-lan-access.md`.
 | **C** | DXcam capture → local preview + FPS/latency counters | Desktop Duplication viability | **Implemented** |
 | **D** | WASAPI loopback → local playback + underrun metrics | System-audio capture | **Implemented** |
 | **E** | aiortc synthetic video track | WebRTC video / ICE host behavior | **Implemented** |
-| **F** | aiortc synthetic audio + Opus playback | WebRTC audio path | Not started |
+| **F** | aiortc synthetic audio + Opus playback | WebRTC audio path | **Implemented** |
 
 ---
 
@@ -722,6 +721,170 @@ Normal `pytest` does not require two computers or an interactive preview.
 
 ---
 
+## Experiment F — synthetic WebRTC Opus audio (aiortc)
+
+### Purpose
+
+Prove that aiortc can exchange a **synthetic** Opus audio stream between two
+Windows 11 peers over **host ICE candidates** on the physical LAN (including
+with both VPNs enabled), with 48 kHz / 20 ms frames, sample-driven PTS, bounded
+receiver buffering, tone verification, and optional low-gain playback.
+
+This experiment does **not** capture microphone or system audio, does not use
+DXcam, and does not add production pairing or the final PySide6 UI. Signaling is
+**experiment-only** and insecure.
+
+```text
+Experiment-only signaling: no production authentication.
+Use only on your private LAN.
+```
+
+**SAFE VOLUME WARNING:** When playback is enabled, a synthetic tone plays through
+the selected speakers. Keep gain low (default `0.25`). Do not raise Windows
+master volume for this test.
+
+Pipeline:
+
+```text
+SyntheticAudioTrack (s16 / 48 kHz / 20 ms) → aiortc Opus → WebRTC UDP/RTP (host ICE)
+Receiver track.recv() → bounded ring buffer → optional WASAPI playback → metrics
+Signaling: HTTP offer/answer on sender --bind-ip (reuses Experiment E signaling)
+```
+
+### Setup / dependencies
+
+```powershell
+pip install -e ".[dev,webrtc]"
+# Audible playback also needs:
+pip install -e ".[audio]"
+```
+
+### Commands
+
+```powershell
+# Printed guide (exact A/B steps)
+python experiments/experiment_f_webrtc_audio.py guide
+
+# Sender (Computer A)
+python experiments/experiment_f_webrtc_audio.py send `
+  --bind-ip 192.168.1.25 `
+  --port 3849 `
+  --tone-frequency 440 `
+  --sample-rate 48000 `
+  --channels 2 `
+  --frame-ms 20 `
+  --duration 120 `
+  --session-name vpn-on-on
+
+# Receiver (Computer B) with conservative playback gain
+python experiments/experiment_f_webrtc_audio.py receive `
+  --remote-ip 192.168.1.25 `
+  --port 3849 `
+  --source-ip 192.168.1.30 `
+  --playback-device default `
+  --gain 0.25 `
+  --duration 120 `
+  --session-name vpn-on-on
+
+# Receiver without audible playback (metrics only)
+python experiments/experiment_f_webrtc_audio.py receive `
+  --remote-ip 192.168.1.25 `
+  --port 3849 `
+  --source-ip 192.168.1.30 `
+  --no-playback `
+  --duration 600 `
+  --json
+```
+
+Default port is **3849**. Default signal is a **440 Hz sine** at **15% digital
+amplitude**, stereo, 48 kHz, 20 ms frames (960 samples/channel).
+
+### Signal modes
+
+| `--signal` | Behavior |
+|---|---|
+| `sine` | Continuous tone at `--tone-frequency` (default) |
+| `silence` | All-zero PCM; PTS still advances by 960 |
+| `pulse` | Periodic click every `--pulse-interval-ms` |
+| `alternating` | 500 ms tone / 500 ms silence |
+
+### Opus, 48 kHz, and sample-driven PTS
+
+* Available audio codecs are printed before connect. Opus is preferred explicitly.
+* If Opus is missing, the experiment fails with `OPUS_UNAVAILABLE` (no PCMU/PCMA fallback).
+* Canonical frames: `s16`, stereo, 48_000 Hz, 960 samples/channel, `time_base=1/48000`.
+* First PTS is `0`; each ordinary frame advances PTS by exactly `960`. Wall-clock
+  time is never used as PTS. Late generation preserves the continuous sample
+  timeline and increments late-generation counters.
+
+### Reading ICE candidates and the selected pair
+
+Same fields as Experiment E (`connection.selected_*_candidate`,
+`candidate_matches_requested_lan_ip`). VPN adapter selection is reported as
+`ICE_SELECTED_WRONG_INTERFACE` (warning / diagnostic), not hidden.
+
+### Interpreting jitter, RTT, underruns, and tone checks
+
+| Metric | How to read it |
+|---|---|
+| RTT (`current_rtt_ms`) | WebRTC round-trip estimate when available |
+| Jitter | Packet timing variation (ms) |
+| `local_receiver_buffering_delay_ms` | Local ring-buffer depth — **not** end-to-end latency |
+| Underruns | Playback needed data; silence inserted |
+| Overruns | Buffer full; oldest samples dropped (bounded) |
+| `estimated_frequency_hz` | FFT/ZCR estimate; expect ~435–445 for 440 Hz sine |
+
+### Both-VPN test procedure
+
+1. Confirm Experiment B `vpn-on-on` TCP reachability when possible.
+2. Use Experiment A `list` to pick physical LAN IPv4s on each PC.
+3. Enable both VPNs; keep allow-LAN / split-tunnel as intended.
+4. Start sender on A with `--bind-ip <A-LAN-IP>`.
+5. Start receiver on B with `--remote-ip <A-LAN-IP>` and `--source-ip <B-LAN-IP>`.
+6. Confirm Opus selected, ICE connected, LAN candidate pair, continuous audio,
+   bounded buffer, zero (or near-zero) PTS errors, clean shutdown.
+
+### Common failures
+
+| Symptom | Likely cause |
+|---|---|
+| `OPUS_UNAVAILABLE` | aiortc/PyAV missing Opus |
+| `SIGNALING_CONNECTION_FAILED` | TCP to `--bind-ip:port` blocked / wrong IP |
+| `ICE_CONNECTION_FAILED` | UDP/RTP blocked between LAN IPs |
+| `ICE_SELECTED_WRONG_INTERFACE` | VPN/virtual adapter selected |
+| `FIRST_AUDIO_FRAME_TIMEOUT` | Media UDP stalled after ICE looked up |
+| `PLAYBACK_OPEN_FAILED` | Use `--no-playback` to isolate receive path |
+
+### Pass / fail criteria
+
+1. Opus available and selected.
+2. Synthetic audio works locally and between the two computers.
+3. Works with both VPNs on, **or** diagnostics clearly identify the block.
+4. Selected candidate pair recorded; LAN path confirmed or mismatch reported.
+5. Received audio at 48 kHz; PTS continuous / sample-driven.
+6. 440 Hz tone detected within reasonable tolerance.
+7. Playback understandable and mostly continuous at low gain.
+8. Receiver buffering bounded; underruns/overruns recorded.
+9. 10-minute run shows no continuous memory growth.
+10. Ctrl+C / duration completion release resources.
+11. `pytest`, Ruff, and mypy pass.
+12. No real system-audio transport, screen integration, production pairing, or UI.
+
+### Automated tests
+
+```powershell
+pytest tests/unit/test_synthetic_audio.py tests/unit/test_audio_receive_buffer.py `
+  tests/unit/test_audio_network_metrics.py tests/unit/test_codec_preference.py `
+  tests/integration/test_webrtc_audio_local.py
+# Optional real two-machine / speakers:
+pytest -m network
+pytest -m hardware
+```
+
+Normal `pytest` does not require speakers or two computers.
+
+---
+
 ## Execution order
 
 1. **Experiment A** first — foundation for VPN-safe networking.
@@ -729,7 +892,7 @@ Normal `pytest` does not require two computers or an interactive preview.
 3. **Experiment C** — local DXcam viability before WebRTC / Phase 1.
 4. **Experiment D** — local WASAPI loopback viability.
 5. **Experiment E** — synthetic WebRTC video / ICE host path.
-6. Then **F** for the remaining Phase 0 go/no-go gate.
+6. **Experiment F** — synthetic WebRTC Opus audio / ICE host path.
 
 ## Go / no-go gate (from PLAN.md)
 

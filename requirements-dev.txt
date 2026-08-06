@@ -9,5 +9,7 @@
 # For Experiment C screen capture, also install: pip install -e ".[capture]"
 # For Experiment D WASAPI loopback audio, also install: pip install -e ".[audio]"
 # For Experiment E synthetic WebRTC video, also install: pip install -e ".[webrtc]"
+# For Experiment F synthetic WebRTC Opus audio, also install: pip install -e ".[webrtc]"
+#   (add .[audio] when audible WASAPI playback is needed)
 
 -e ".[dev]"

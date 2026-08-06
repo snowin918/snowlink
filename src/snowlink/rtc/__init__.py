@@ -1,1 +1,1 @@
-"""Experiment E WebRTC helpers (synthetic video). Not production signaling."""
+"""Experiment E/F WebRTC helpers (synthetic video/audio). Not production signaling."""

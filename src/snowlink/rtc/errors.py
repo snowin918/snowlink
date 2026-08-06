@@ -1,4 +1,4 @@
-"""Structured WebRTC errors for Experiment E (synthetic video)."""
+"""Structured WebRTC errors for Experiments E/F (synthetic video/audio)."""
 
 from __future__ import annotations
 
@@ -32,6 +32,9 @@ _CAUSES: dict[str, str] = {
     ),
     "VP8_UNAVAILABLE": (
         "VP8 is not available in the local aiortc / PyAV codec list."
+    ),
+    "OPUS_UNAVAILABLE": (
+        "Opus is not available in the local aiortc / PyAV codec list."
     ),
     "INVALID_BIND_IP": (
         "The requested bind or source IPv4 address is not a valid dotted IPv4."
@@ -81,14 +84,44 @@ _CAUSES: dict[str, str] = {
     "PREVIEW_FAILED": (
         "The experimental OpenCV preview window could not be created or updated."
     ),
+    "AUDIO_TRACK_NOT_RECEIVED": (
+        "The receiver did not receive a remote audio track after the peer connected."
+    ),
+    "FIRST_AUDIO_FRAME_TIMEOUT": (
+        "No remote audio frames arrived within the first-frame timeout."
+    ),
+    "INVALID_AUDIO_FRAME": (
+        "A remote audio frame had an unexpected format, layout, or sample count."
+    ),
+    "AUDIO_PTS_ERROR": (
+        "Received audio PTS values were missing, duplicate, or decreasing."
+    ),
+    "PLAYBACK_DEVICE_NOT_FOUND": (
+        "The requested WASAPI playback endpoint could not be resolved."
+    ),
+    "PLAYBACK_OPEN_FAILED": (
+        "The WASAPI playback stream could not be opened."
+    ),
+    "PLAYBACK_WRITE_FAILED": (
+        "Writing PCM to the playback stream failed."
+    ),
+    "AUDIO_BUFFER_UNDERRUN": (
+        "The receiver audio ring buffer underran (missing data; silence inserted)."
+    ),
+    "AUDIO_BUFFER_OVERRUN": (
+        "The receiver audio ring buffer overran (oldest samples dropped)."
+    ),
     "PEER_DISCONNECTED": (
         "The remote peer disconnected before the experiment duration completed."
     ),
     "UNEXPECTED_WEBRTC_ERROR": (
         "An unexpected exception occurred in the WebRTC experiment pipeline."
     ),
+    "UNEXPECTED_WEBRTC_AUDIO_ERROR": (
+        "An unexpected exception occurred in the WebRTC audio experiment pipeline."
+    ),
     "INVALID_CONFIGURATION": (
-        "One or more Experiment E configuration values are outside the allowed ranges."
+        "One or more experiment configuration values are outside the allowed ranges."
     ),
 }
 
@@ -102,6 +135,9 @@ _ACTIONS: dict[str, str] = {
     "VP8_UNAVAILABLE": (
         "Confirm aiortc/PyAV install; re-run and inspect available codecs. "
         "Only use --allow-h264-fallback if you explicitly want H.264."
+    ),
+    "OPUS_UNAVAILABLE": (
+        "Confirm aiortc/PyAV install advertises audio/opus. Do not fall back to PCMU/PCMA."
     ),
     "INVALID_BIND_IP": (
         "Pass a dotted IPv4 such as 192.168.1.25 for --bind-ip / --source-ip."
@@ -121,13 +157,13 @@ _ACTIONS: dict[str, str] = {
         "Retry; if persistent, check VPN allow-LAN / firewall and increase --timeouts."
     ),
     "MALFORMED_SDP": (
-        "Ensure both peers run the same Experiment E script version; do not hand-edit SDP."
+        "Ensure both peers run the same experiment script version; do not hand-edit SDP."
     ),
     "OFFER_REJECTED": (
         "Ensure only one receiver connects; restart the sender if a previous session stuck."
     ),
     "ANSWER_REJECTED": (
-        "Restart both peers; confirm VP8 availability and matching experiment versions."
+        "Restart both peers; confirm Opus/VP8 availability and matching experiment versions."
     ),
     "ICE_GATHERING_TIMEOUT": (
         "Check local adapters and firewall; host-only ICE should gather quickly on LAN."
@@ -138,7 +174,7 @@ _ACTIONS: dict[str, str] = {
     ),
     "ICE_SELECTED_WRONG_INTERFACE": (
         "Record the selected candidate pair. Prefer physical LAN IPs; VPN selection is a "
-        "diagnostic result for Experiment E, not a silent success."
+        "diagnostic result, not a silent success."
     ),
     "DTLS_CONNECTION_FAILED": (
         "Retry the session; if ICE succeeds but DTLS fails, capture peer states and retry."
@@ -155,14 +191,44 @@ _ACTIONS: dict[str, str] = {
     "PREVIEW_FAILED": (
         "Use --no-preview for headless metrics, or ensure a desktop session for OpenCV."
     ),
+    "AUDIO_TRACK_NOT_RECEIVED": (
+        "Confirm the sender added the synthetic audio track and negotiation completed."
+    ),
+    "FIRST_AUDIO_FRAME_TIMEOUT": (
+        "Check ICE selected pair and packet-loss stats; verify UDP audio is not blocked."
+    ),
+    "INVALID_AUDIO_FRAME": (
+        "Inspect received format/layout/sample-rate; Opus decode should yield 48 kHz PCM."
+    ),
+    "AUDIO_PTS_ERROR": (
+        "Inspect PTS continuity in results; regenerate with the Experiment F synthetic track."
+    ),
+    "PLAYBACK_DEVICE_NOT_FOUND": (
+        "Use --playback-device default or a valid WASAPI output index from Experiment D list."
+    ),
+    "PLAYBACK_OPEN_FAILED": (
+        "Confirm speakers/headphones are available; retry with --no-playback for metrics."
+    ),
+    "PLAYBACK_WRITE_FAILED": (
+        "Retry; if persistent, use --no-playback to isolate WebRTC receive from WASAPI."
+    ),
+    "AUDIO_BUFFER_UNDERRUN": (
+        "Treat as a metric/warning unless continuous; check jitter and network loss."
+    ),
+    "AUDIO_BUFFER_OVERRUN": (
+        "Treat as a metric/warning; oldest samples are dropped to bound latency."
+    ),
     "PEER_DISCONNECTED": (
         "Restart both peers; confirm duration and network path remain stable."
     ),
     "UNEXPECTED_WEBRTC_ERROR": (
         "Re-run with --json, capture the error code/states, and retry after a clean exit."
     ),
+    "UNEXPECTED_WEBRTC_AUDIO_ERROR": (
+        "Re-run with --json, capture the error code/states, and retry after a clean exit."
+    ),
     "INVALID_CONFIGURATION": (
-        "Adjust --width, --height, --fps, --duration, --port, or timeout flags."
+        "Adjust duration, port, sample-rate, channels, frame-ms, gain, or timeout flags."
     ),
 }
 
@@ -222,7 +288,9 @@ def map_exception(exc: BaseException) -> WebRTCFailure:
             exception=exc,
         )
     return failure_for(
-        "UNEXPECTED_WEBRTC_ERROR",
+        "UNEXPECTED_WEBRTC_AUDIO_ERROR"
+        if "audio" in text
+        else "UNEXPECTED_WEBRTC_ERROR",
         f"Unexpected WebRTC error ({name}).",
         exception=exc,
     )

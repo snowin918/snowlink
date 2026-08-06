@@ -18,6 +18,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.6",
     "mypy>=1.11",
+    "pyinstaller>=6.0",
 ]
 
 [project.scripts]

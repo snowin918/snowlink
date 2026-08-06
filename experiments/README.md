@@ -4,20 +4,19 @@ This directory holds **disposable technical-validation scripts** for Phase 0.
 Scripts prove risky dependencies work in isolation on Windows 11 (including with
 VPNs connected) before the full application is built.
 
-**Status:** Experiment **A** is implemented. Experiments B–F are **not**
-implemented yet.
+**Status:** Experiments **A** and **B** are implemented. Experiments C–F are
+**not** implemented yet.
 
 Do not treat scripts here as production application architecture. Prefer printed
-pass/fail output and optional metrics JSON. Document VPN failure modes for
-Experiment B into `docs/vpn-lan-access.md` when that experiment is complete
-(not yet).
+pass/fail output and optional metrics JSON. VPN / LAN failure guidance from
+Experiment B lives in `docs/vpn-lan-access.md`.
 
 ## Experiment overview
 
 | ID | Purpose | Demonstrates | Status |
 |---|---|---|---|
 | **A** | Adapter enumeration, classification, and bind-to-selected-IP TCP echo | Physical LAN IPv4 selection; VPN/virtual adapters visible but not preferred; listener bound to the chosen address | **Implemented** |
-| **B** | Two-machine TCP connect with **both VPNs enabled** | Real LAN reachability under VPN; failure modes for allow-LAN / split-tunnel guidance | Not started |
+| **B** | Two-machine TCP connect with **both VPNs enabled** | Real LAN reachability under VPN; failure modes for allow-LAN / split-tunnel guidance | **Implemented** |
 | **C** | DXcam capture → local preview + FPS/latency counters | Desktop Duplication viability | Not started |
 | **D** | WASAPI loopback → local playback + underrun metrics | System-audio capture | Not started |
 | **E** | aiortc synthetic video track | WebRTC video / ICE host behavior | Not started |
@@ -180,6 +179,44 @@ mypy
 ```
 
 Windows-specific enumeration smoke tests are skipped on non-Windows platforms.
+
+---
+
+## Experiment B — two-machine TCP under VPN scenarios
+
+### Purpose
+
+Measure LAN TCP reachability between two PCs while VPNs are off/on in four
+combinations. Reuses Experiment A bind + echo. Full runbook:
+[`docs/vpn-lan-access.md`](../docs/vpn-lan-access.md).
+
+### Commands
+
+```powershell
+python experiments/experiment_b_two_machine_tcp.py guide
+
+# Computer A
+python experiments/experiment_b_two_machine_tcp.py serve `
+  --ip <A-LAN-IP> --port 3847 --session-name vpn-off-off --serve-forever
+
+# Computer B
+python experiments/experiment_b_two_machine_tcp.py connect `
+  --ip <A-LAN-IP> --port 3847 --session-name vpn-off-off `
+  --source-ip <B-LAN-IP> --timeout 5
+
+python experiments/experiment_b_two_machine_tcp.py summarize `
+  --results-dir experiment-results/experiment-b
+```
+
+Session names: `vpn-off-off`, `vpn-on-off`, `vpn-off-on`, `vpn-on-on`.
+
+Results are written under gitignored `experiment-results/experiment-b/`.
+
+### Automated tests
+
+```powershell
+pytest tests/unit/test_experiment_b_*.py tests/integration/test_experiment_b_tcp.py
+```
 
 ---
 

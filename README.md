@@ -87,6 +87,7 @@ packaging/        PyInstaller / installer artifacts
 config/           Default non-secret configuration
 ```
 
-See `PLAN.md` for the full engineering plan. Phase 0 Experiment A (adapter
-enumeration and bind-to-IP TCP echo) lives under `experiments/`; see
-`experiments/README.md`. Experiments B–F are not implemented yet.
+See `PLAN.md` for the full engineering plan. Phase 0 Experiments A (adapter
+bind) and B (two-machine TCP under VPN scenarios) live under `experiments/`;
+see `experiments/README.md` and `docs/vpn-lan-access.md`. Experiments C–F are
+not implemented yet.

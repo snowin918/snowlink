@@ -55,6 +55,7 @@ packaging/build/
 experiments/**/results/
 experiments/**/*.json
 !experiments/README.md
+experiment-results/
 
 # Logs
 *.log

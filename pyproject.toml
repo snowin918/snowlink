@@ -26,6 +26,12 @@ capture = [
     "numpy>=1.26",
     "psutil>=5.9",
 ]
+audio = [
+    "PyAudioWPatch>=0.2.12.6",
+    "av>=12.0",
+    "numpy>=1.26",
+    "psutil>=5.9",
+]
 
 [project.scripts]
 snowlink = "snowlink.__main__:main"
@@ -39,7 +45,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "integration: local network/socket integration tests",
-    "hardware: optional tests requiring real DXcam / desktop capture",
+    "hardware: optional tests requiring real DXcam / desktop capture or WASAPI audio",
 ]
 
 [tool.ruff]

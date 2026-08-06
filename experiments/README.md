@@ -4,7 +4,9 @@ This directory holds **disposable technical-validation scripts** for Phase 0.
 Scripts prove risky dependencies work in isolation on Windows 11 (including with
 VPNs connected) before the full application is built.
 
-**Status:** Experiments **A**, **B**, and **C** are implemented. Experiments D–F
+## Status
+
+Experiments **A**, **B**, **C**, and **D** are implemented. Experiments E–F
 are **not** implemented yet.
 
 Do not treat scripts here as production application architecture. Prefer printed
@@ -18,7 +20,7 @@ Experiment B lives in `docs/vpn-lan-access.md`.
 | **A** | Adapter enumeration, classification, and bind-to-selected-IP TCP echo | Physical LAN IPv4 selection; VPN/virtual adapters visible but not preferred; listener bound to the chosen address | **Implemented** |
 | **B** | Two-machine TCP connect with **both VPNs enabled** | Real LAN reachability under VPN; failure modes for allow-LAN / split-tunnel guidance | **Implemented** |
 | **C** | DXcam capture → local preview + FPS/latency counters | Desktop Duplication viability | **Implemented** |
-| **D** | WASAPI loopback → local playback + underrun metrics | System-audio capture | Not started |
+| **D** | WASAPI loopback → local playback + underrun metrics | System-audio capture | **Implemented** |
 | **E** | aiortc synthetic video track | WebRTC video / ICE host behavior | Not started |
 | **F** | aiortc synthetic audio + Opus playback | WebRTC audio path | Not started |
 
@@ -384,12 +386,187 @@ Normal `pytest` does not require an interactive capture window.
 
 ---
 
+## Experiment D — WASAPI system-audio loopback validation
+
+### Purpose
+
+Prove that PyAudioWPatch can capture Windows system audio via WASAPI loopback
+from a selected output endpoint, convert it to a Snowlink-friendly PCM format
+(48 kHz / stereo / 20 ms frames), optionally play it locally, and report
+bounded-buffer underrun/overrun metrics, CPU, and memory — enough to decide
+whether Snowlink can proceed with WASAPI loopback for Phase 1 audio.
+
+This experiment is **local only**. It does **not** stream over the network,
+encode Opus, use WebRTC, or open the final Snowlink UI.
+
+Pipeline:
+
+```text
+WASAPI loopback → PCM callback → bounded ring buffer (drop-oldest)
+→ format/channel convert → resample to 48 kHz → 20 ms frames (sample-driven PTS)
+→ optional local playback → metrics
+```
+
+### What WASAPI loopback is
+
+A WASAPI **loopback** endpoint captures whatever is currently playing through a
+Windows **output** device (speakers/headphones). It is **not** a microphone.
+Snowlink must never select a microphone for system-audio capture. Protected /
+DRM audio may appear as silence on some configurations.
+
+### Silence vs underrun
+
+| Situation | Meaning |
+|---|---|
+| Valid silence | Capture delivered all-zero (or near-zero) PCM — normal when nothing is playing |
+| Underrun | Ring buffer had no data in time — *missing* data; pipeline emits a silence frame and keeps PTS continuous |
+| DRM / protected audio | May capture as silence; not treated as a pipeline error by itself |
+
+### Setup / dependencies
+
+```powershell
+pip install -e ".[dev,audio]"
+```
+
+This installs `PyAudioWPatch`, `av` (PyAV), `numpy`, and `psutil`.
+
+### Commands
+
+```powershell
+# List endpoints (loopback vs physical output vs microphones)
+python experiments/experiment_d_audio_loopback.py list
+
+# Capture only (no playback) — play non-DRM system audio while this runs
+python experiments/experiment_d_audio_loopback.py monitor `
+  --capture-device default `
+  --duration 30
+
+# Capture + local playback (prefer headphones; gain is software-only)
+python experiments/experiment_d_audio_loopback.py playback `
+  --capture-device default `
+  --playback-device default `
+  --duration 60 `
+  --gain 0.5
+
+# Timed benchmark (writes JSON under experiment-results/experiment-d/)
+python experiments/experiment_d_audio_loopback.py benchmark `
+  --capture-device default `
+  --playback-device default `
+  --duration 60 `
+  --sample-rate 48000 `
+  --channels 2 `
+  --frame-ms 20 `
+  --buffer-ms 160 `
+  --json
+
+# Optional coarse latency helper (requires typing YES; does not claim precision)
+python experiments/experiment_d_audio_loopback.py latency `
+  --capture-device default `
+  --playback-device default `
+  --duration 20
+```
+
+Mute local playback without stopping capture: add `--muted`.
+
+### Device selection
+
+1. Run `list`.
+2. Find the **WASAPI loopback capture endpoints** section (names often contain
+   `[Loopback]`).
+3. Match the loopback row to the physical output you are using (associated
+   output name / default output flag).
+4. Pass that loopback index as `--capture-device`, or use `default` for the
+   default WASAPI output’s loopback analogue.
+5. For `--playback-device`, pick a **physical output** (not a loopback, not a
+   microphone). Prefer headphones.
+
+### Use-headphones warning
+
+Playing loopback through speakers can create echo/feedback if the same physical
+endpoint is used for capture and playback. The program prints warnings when
+that risk is detected. It does **not** raise Windows master volume.
+
+### Interpreting buffer metrics
+
+| Metric | How to read it |
+|---|---|
+| Buffer fill / queue delay | Approximate **local pipeline queue delay** (ring fill) — **not** true end-to-end audio latency |
+| Underruns | Missing data for a frame interval; a few at startup can be OK; continuous underruns are a failure |
+| Overruns / dropped samples | Oldest audio dropped to bound latency when the buffer is full |
+| Non-silent vs silence frames | Non-silent should rise when ordinary non-DRM audio is playing |
+
+### Expected outputs
+
+**`list`** — device index, name, host API, channel counts, default rate, WASAPI
+flag, loopback flag, associated physical output, default-output flag, capture /
+playback usability, grouped by kind.
+
+**`monitor`** — periodic peak/RMS/fill/underrun lines; no raw PCM printed.
+
+**`benchmark`** — console summary plus JSON such as:
+
+```text
+experiment-results/experiment-d/2026-08-06T170000_loopback-default_48k_stereo.json
+```
+
+PCM / WAV files are **not** stored unless you add a future explicit recording
+path (not part of this experiment).
+
+### Common errors
+
+| Code | Likely cause / next step |
+|---|---|
+| `PYAUDIO_WPATCH_NOT_INSTALLED` | `pip install -e ".[audio]"` |
+| `WASAPI_NOT_AVAILABLE` | Confirm Windows audio stack; re-run `list` |
+| `NO_LOOPBACK_DEVICE` / `INVALID_CAPTURE_DEVICE` | Pick a loopback endpoint from `list`, not a microphone |
+| `INVALID_PLAYBACK_DEVICE` | Pick a physical output from `list` |
+| `CAPTURE_OPEN_FAILED` / `PLAYBACK_OPEN_FAILED` | Device exclusive lock / disconnected — re-run `list` |
+| `DEVICE_DISCONNECTED` | Endpoint changed; re-run `list` and select again |
+| `RESAMPLE_FAILED` | Install/upgrade PyAV (`av`) via `.[audio]` |
+
+Underruns/overruns are normally metrics/warnings, not immediate fatal errors.
+
+### DRM limitation
+
+Some protected media paths may yield silence on loopback. Treat that as a
+platform limitation, not necessarily a Snowlink bug, when ordinary non-DRM
+audio captures correctly.
+
+### Pass / fail criteria
+
+1. Active Windows output and its loopback counterpart are listed.
+2. Ordinary non-DRM system audio produces non-silent captured frames.
+3. Capture runs continuously for ≥ 60 seconds.
+4. Optional local playback is understandable and mostly continuous.
+5. 48 kHz conversion works.
+6. Audio PTS increases continuously by output sample count.
+7. Buffer growth remains bounded (drop-oldest).
+8. Underrun and overrun metrics are reported.
+9. CPU and memory are recorded.
+10. Ctrl+C and duration completion release audio resources.
+11. Automated checks pass (`pytest`, `ruff`, `mypy`).
+
+### Automated tests
+
+```powershell
+pytest tests/unit/test_audio_ring_buffer.py tests/unit/test_audio_format.py `
+  tests/unit/test_audio_metrics.py tests/integration/test_audio_pipeline_synthetic.py
+# Optional live WASAPI:
+pytest -m hardware
+```
+
+Normal `pytest` does not require speakers, a loopback device, or interactive
+playback.
+
+---
+
 ## Execution order
 
 1. **Experiment A** first — foundation for VPN-safe networking.
 2. **Experiment B** next — two-machine reachability before heavy media work.
 3. **Experiment C** — local DXcam viability before WebRTC / Phase 1.
-4. Then **E** and **D**/**F** for the remaining Phase 0 go/no-go gate.
+4. **Experiment D** — local WASAPI loopback viability.
+5. Then **E** and **F** for the remaining Phase 0 go/no-go gate.
 
 ## Go / no-go gate (from PLAN.md)
 

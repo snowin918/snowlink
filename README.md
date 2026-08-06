@@ -88,6 +88,12 @@ config/           Default non-secret configuration
 ```
 
 See `PLAN.md` for the full engineering plan. Phase 0 Experiments A (adapter
-bind) and B (two-machine TCP under VPN scenarios) live under `experiments/`;
-see `experiments/README.md` and `docs/vpn-lan-access.md`. Experiments C–F are
-not implemented yet.
+bind), B (two-machine TCP under VPN scenarios), and C (DXcam local screen
+capture) live under `experiments/`; see `experiments/README.md` and
+`docs/vpn-lan-access.md`. Experiments D–F are not implemented yet.
+
+Capture dependencies for Experiment C:
+
+```powershell
+pip install -e ".[dev,capture]"
+```

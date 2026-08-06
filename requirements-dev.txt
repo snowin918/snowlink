@@ -6,5 +6,6 @@
 #   - Install command: pip install -e ".[dev]"
 #
 # Includes the runtime package (editable) plus pytest, pytest-asyncio, ruff, and mypy.
+# For Experiment C screen capture, also install: pip install -e ".[capture]"
 
 -e ".[dev]"

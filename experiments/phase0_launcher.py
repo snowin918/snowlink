@@ -10,7 +10,8 @@ Usage (built exe)::
 
     snowlink-phase0.exe a list
     snowlink-phase0.exe b serve --ip 192.168.1.25 --port 3847 --session-name vpn-off-off
-    snowlink-phase0.exe b connect --ip 192.168.1.25 --session-name vpn-off-off --source-ip 192.168.1.30
+    snowlink-phase0.exe b connect --ip 192.168.1.25 --session-name vpn-off-off \\
+        --source-ip 192.168.1.30
 """
 
 from __future__ import annotations

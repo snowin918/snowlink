@@ -4,8 +4,8 @@ This directory holds **disposable technical-validation scripts** for Phase 0.
 Scripts prove risky dependencies work in isolation on Windows 11 (including with
 VPNs connected) before the full application is built.
 
-**Status:** Experiments **A** and **B** are implemented. Experiments C–F are
-**not** implemented yet.
+**Status:** Experiments **A**, **B**, and **C** are implemented. Experiments D–F
+are **not** implemented yet.
 
 Do not treat scripts here as production application architecture. Prefer printed
 pass/fail output and optional metrics JSON. VPN / LAN failure guidance from
@@ -17,7 +17,7 @@ Experiment B lives in `docs/vpn-lan-access.md`.
 |---|---|---|---|
 | **A** | Adapter enumeration, classification, and bind-to-selected-IP TCP echo | Physical LAN IPv4 selection; VPN/virtual adapters visible but not preferred; listener bound to the chosen address | **Implemented** |
 | **B** | Two-machine TCP connect with **both VPNs enabled** | Real LAN reachability under VPN; failure modes for allow-LAN / split-tunnel guidance | **Implemented** |
-| **C** | DXcam capture → local preview + FPS/latency counters | Desktop Duplication viability | Not started |
+| **C** | DXcam capture → local preview + FPS/latency counters | Desktop Duplication viability | **Implemented** |
 | **D** | WASAPI loopback → local playback + underrun metrics | System-audio capture | Not started |
 | **E** | aiortc synthetic video track | WebRTC video / ICE host behavior | Not started |
 | **F** | aiortc synthetic audio + Opus playback | WebRTC audio path | Not started |
@@ -220,11 +220,176 @@ pytest tests/unit/test_experiment_b_*.py tests/integration/test_experiment_b_tcp
 
 ---
 
+## Experiment C — DXcam local screen-capture validation
+
+### Purpose
+
+Prove that DXcam can capture a selected Windows 11 monitor with acceptable
+local capture FPS, preview FPS, frame-age / processing delay, CPU, memory,
+dropped-frame behavior, and clean shutdown — enough to decide whether Snowlink
+can proceed with DXcam for the Phase 1 screen-streaming prototype.
+
+This experiment is **local only**. It does **not** stream over the network,
+use WebRTC, capture system audio, or open the final Snowlink UI.
+
+Pipeline:
+
+```text
+DXcam grab → latest-frame slot (depth 1) → letterbox scale → optional OpenCV preview → metrics
+```
+
+Scaling policy: fit inside the requested WxH while preserving aspect ratio;
+letterbox with black bars (never stretch). Scaling time is measured separately
+from capture time.
+
+### Monitor index mapping
+
+Snowlink `--monitor N` is a **logical** index (primary first, then desktop
+origin). It is mapped to DXcam `(device_idx, output_idx)` by matching desktop
+rectangles, then `HMONITOR`, then `\\.\DISPLAYn` device names. Do **not** assume
+`--monitor` equals DXcam `output_idx`.
+
+### Setup / dependencies
+
+```powershell
+pip install -e ".[dev,capture]"
+```
+
+This installs `dxcam[cv2,winrt]`, `opencv-python`, `numpy`, and `psutil`.
+
+### Commands
+
+```powershell
+# List monitors, DPI, DXcam indices, backend availability
+python experiments/experiment_c_screen_capture.py list
+
+# Interactive preview (Esc or close window to stop)
+python experiments/experiment_c_screen_capture.py preview `
+  --monitor 0 `
+  --fps 30 `
+  --width 1280 `
+  --height 720 `
+  --backend dxgi
+
+# Timed benchmark (writes JSON under experiment-results/experiment-c/)
+python experiments/experiment_c_screen_capture.py benchmark `
+  --monitor 0 `
+  --fps 30 `
+  --width 1280 `
+  --height 720 `
+  --backend dxgi `
+  --duration 60
+
+# JSON to stdout as well
+python experiments/experiment_c_screen_capture.py benchmark `
+  --monitor 0 --backend dxgi --fps 30 --width 1280 --height 720 `
+  --duration 60 --json --no-preview
+
+# Low / Balanced / High suite (no preview unless --show-preview)
+python experiments/experiment_c_screen_capture.py suite `
+  --monitor 0 `
+  --backend dxgi `
+  --duration-per-preset 60
+```
+
+Defaults match the Balanced Snowlink preset: **1280×720 @ 30 FPS**.
+
+### Expected outputs
+
+**`list`** — monitor index, name, desktop coordinates (may be negative),
+width/height, primary flag, DPI when available, mapped DXcam device/output
+indices, and backend availability (`dxgi` / `winrt`).
+
+**`preview`** — OpenCV window with overlays for capture FPS, preview FPS,
+dropped/null frames, and approximate local frame age. Esc / window close /
+Ctrl+C release capture resources.
+
+**`benchmark` / `suite`** — console summary plus JSON files such as:
+
+```text
+experiment-results/experiment-c/2026-08-06T160000_monitor-0_dxgi_balanced.json
+```
+
+Screenshots / frame pixels are **not** stored.
+
+### Interpreting metrics
+
+| Metric | How to read it |
+|---|---|
+| Actual capture FPS | Should be within ~10% of the requested FPS under light desktop activity for Balanced |
+| Dropped / overwritten frames | Expected when preview/scale is slower than capture; depth-1 slot drops stale frames so latency does not grow |
+| Frame age / capture-to-preview | Approximate **local** delay from grab timestamp to consume/render — **not** glass-to-glass latency |
+| CPU / memory | Process-level via psutil; memory should not climb continuously over a 60s run |
+| Null frames | DXcam returned no new frame; some nulls are normal depending on desktop damage |
+
+Completing the High preset command does **not** by itself mean the machine
+“supports” High — inspect FPS, CPU, and memory first.
+
+### Backend comparison (DXGI vs WinRT)
+
+When WinRT is listed as available:
+
+```powershell
+python experiments/experiment_c_screen_capture.py benchmark `
+  --monitor 0 --backend dxgi --fps 30 --width 1280 --height 720 `
+  --duration 60 --no-preview
+
+python experiments/experiment_c_screen_capture.py benchmark `
+  --monitor 0 --backend winrt --fps 30 --width 1280 --height 720 `
+  --duration 60 --no-preview
+```
+
+Compare actual FPS, frame-age metrics, CPU, memory, cursor behavior, and
+stability. Cursor compositing: DXGI does not support `--show-cursor` in DXcam;
+WinRT does (via DXcam’s WinRT cursor option). Requesting `--show-cursor` with
+DXGI fails clearly with `UNSUPPORTED_CURSOR_CAPTURE`.
+
+### Common DXcam failures
+
+| Code | Likely cause / next step |
+|---|---|
+| `DXCAM_NOT_INSTALLED` | `pip install -e ".[capture]"` |
+| `BACKEND_UNAVAILABLE` | Try the other backend; install `dxcam[winrt]` for WinRT |
+| `INVALID_MONITOR` | Re-run `list` and pick a valid index |
+| `CAPTURE_INITIALIZATION_FAILED` | Monitor disconnected, exclusive fullscreen conflict, or another capture client |
+| `CAPTURE_FRAME_TIMEOUT` | Lower FPS/resolution or switch backend |
+| `UNSUPPORTED_CURSOR_CAPTURE` | Omit `--show-cursor` or use `--backend winrt` |
+| `PREVIEW_INITIALIZATION_FAILED` | Need GUI OpenCV / active desktop; use `--no-preview` for headless metrics |
+
+### Pass / fail criteria (experimental targets)
+
+For the **Balanced** preset on each target PC:
+
+1. Intended monitor can be selected.
+2. Capture runs ≥ 60 seconds continuously.
+3. Actual capture FPS within ~10% of 30 under light desktop activity.
+4. Preview stays responsive (when used).
+5. Dropped frames do not cause growing latency (depth-1 slot).
+6. CPU and memory are recorded.
+7. Memory does not grow continuously during the test.
+8. Escape, window close, and Ctrl+C release capture resources.
+9. Multi-monitor coordinates are reported correctly when applicable.
+10. Automated checks pass (`pytest`, `ruff`, `mypy`).
+
+### Automated tests
+
+```powershell
+pytest tests/unit/test_frame_slot.py tests/unit/test_capture_configuration.py `
+  tests/unit/test_capture_metrics.py tests/integration/test_screen_capture_smoke.py
+# Optional live DXcam grab:
+pytest -m hardware
+```
+
+Normal `pytest` does not require an interactive capture window.
+
+---
+
 ## Execution order
 
 1. **Experiment A** first — foundation for VPN-safe networking.
 2. **Experiment B** next — two-machine reachability before heavy media work.
-3. Then **C**/**E** and **D**/**F** for the Phase 0 go/no-go gate.
+3. **Experiment C** — local DXcam viability before WebRTC / Phase 1.
+4. Then **E** and **D**/**F** for the remaining Phase 0 go/no-go gate.
 
 ## Go / no-go gate (from PLAN.md)
 

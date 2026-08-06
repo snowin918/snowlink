@@ -20,6 +20,12 @@ dev = [
     "mypy>=1.11",
     "pyinstaller>=6.0",
 ]
+capture = [
+    "dxcam[cv2,winrt]>=0.3.0",
+    "opencv-python>=4.8",
+    "numpy>=1.26",
+    "psutil>=5.9",
+]
 
 [project.scripts]
 snowlink = "snowlink.__main__:main"
@@ -33,6 +39,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "integration: local network/socket integration tests",
+    "hardware: optional tests requiring real DXcam / desktop capture",
 ]
 
 [tool.ruff]

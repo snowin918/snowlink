@@ -234,7 +234,8 @@ def _load_dxcam_outputs() -> list[_DxcamOutput]:
     call private factory attributes.
     """
     try:
-        import dxcam  # type: ignore[import-untyped]
+        import dxcam
+
     except ModuleNotFoundError:
         return []
 
@@ -299,7 +300,8 @@ def probe_backend_availability() -> dict[str, bool]:
             if name == "winrt":
                 # WinRT requires optional winrt-* packages; probe import safely.
                 try:
-                    import dxcam.core.winrt_duplicator  # type: ignore[import-untyped]  # noqa: F401
+                    import dxcam.core.winrt_duplicator  # noqa: F401
+
                 except Exception:
                     availability[name] = False
                     continue

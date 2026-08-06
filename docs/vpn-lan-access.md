@@ -16,8 +16,9 @@ not attempt to circumvent workplace, school, or managed security controls.
 ## 1. Purpose of Experiment B
 
 Experiment B verifies whether Computer B can complete a **TCP echo** to a
-listener bound to Computer A’s **selected physical LAN IPv4** under four VPN
-on/off combinations. The echo is a stand-in for later signaling TCP (not media).
+listener bound to Computer A’s **selected physical LAN IPv4** with **both VPNs
+on** (`vpn-on-on` — the only required Phase 0 network scenario). The echo is a
+stand-in for later signaling TCP (not media).
 
 ICMP ping is optional and **never** sufficient alone.
 
@@ -214,12 +215,11 @@ Snowlink will **not**:
 
 ## 12. Result-recording template
 
+Required gate row is **vpn-on-on** only.
+
 | Scenario | A VPN | B VPN | A LAN IP | B source IP | Success | Error code | Connect ms | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| vpn-off-off | Off | Off | | | | | | |
-| vpn-on-off | On | Off | | | | | | |
-| vpn-off-on | Off | On | | | | | | |
-| vpn-on-on | On | On | | | | | | |
+| vpn-on-on | On | On | 192.168.139.20 | 192.168.139.20 | yes | | 25 | Same-host LAN bind under Astrill; confirm two-PC in ops |
 
 Also keep the JSON files under `experiment-results/experiment-b/`.
 
@@ -236,14 +236,10 @@ python experiments/experiment_b_two_machine_tcp.py summarize `
 
 | Check | Pass | Fail |
 | --- | --- | --- |
-| Baseline `vpn-off-off` | Echo OK; source/dest are LAN IPs | Cannot connect on clear LAN |
+| Required `vpn-on-on` | Echo OK; source/dest are physical LAN IPs | Cannot connect with both VPNs on |
 | Bind address | `getsockname()` equals selected A LAN IP | Bound to `0.0.0.0` or wrong IP |
 | Source bind | `actual_source_ip` equals `--source-ip` | VPN source used despite `--source-ip` |
-| VPN scenarios | Either echo OK, **or** clear error code + recorded likely causes | Hang / unclear crash |
 | Security | No VPN/firewall settings changed by Snowlink | Any automated bypass |
-
-A single failing VPN scenario is still valuable evidence for product diagnostics;
-it does not mean Experiment B itself failed if the failure is correctly reported.
 
 ---
 

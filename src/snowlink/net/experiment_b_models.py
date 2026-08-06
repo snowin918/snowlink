@@ -9,6 +9,7 @@ from typing import Any
 SCHEMA_VERSION = 1
 EXPERIMENT_NAME = "experiment_b_two_machine_tcp"
 
+# Historical session names still accepted when loading archived JSON.
 KNOWN_SESSION_NAMES: frozenset[str] = frozenset(
     {
         "vpn-off-off",
@@ -17,6 +18,9 @@ KNOWN_SESSION_NAMES: frozenset[str] = frozenset(
         "vpn-on-on",
     }
 )
+
+# Phase 0 / Phase 1 gate: both VPNs on is the only required matrix row.
+REQUIRED_SESSION_NAMES: frozenset[str] = frozenset({"vpn-on-on"})
 
 SESSION_MATRIX: dict[str, tuple[str, str]] = {
     "vpn-off-off": ("Off", "Off"),

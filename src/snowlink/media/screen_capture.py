@@ -63,7 +63,8 @@ class _WorkerStats:
 
 def require_dxcam() -> Any:
     try:
-        import dxcam  # type: ignore[import-untyped]
+        import dxcam
+
     except ModuleNotFoundError as exc:
         raise CaptureError(
             failure_for(

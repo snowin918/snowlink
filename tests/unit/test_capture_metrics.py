@@ -57,6 +57,7 @@ def test_timing_accumulator_to_stats() -> None:
 def test_metrics_serialization_roundtrip(tmp_path: Path) -> None:
     result = ExperimentCResult(
         success=True,
+        machine_label="computer-a",
         configuration=CaptureConfiguration(
             monitor=0,
             backend="dxgi",
@@ -82,10 +83,13 @@ def test_metrics_serialization_roundtrip(tmp_path: Path) -> None:
     raw = json.loads(path.read_text(encoding="utf-8"))
     assert raw["experiment"] == "experiment_c_screen_capture"
     assert raw["schema_version"] == SCHEMA_VERSION
+    assert raw["machine_label"] == "computer-a"
+    assert "computer-a" in path.name
     assert raw["capture"]["overwritten_frames"] == 18
     assert any("not glass-to-glass" in n.lower() for n in raw["notes"])
     loaded = load_result(path)
     assert loaded.success is True
+    assert loaded.machine_label == "computer-a"
     assert loaded.configuration is not None
     assert loaded.configuration.preset_name == "balanced"
 

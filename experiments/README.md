@@ -213,10 +213,20 @@ Session names: `vpn-off-off`, `vpn-on-off`, `vpn-off-on`, `vpn-on-on`.
 
 Results are written under gitignored `experiment-results/experiment-b/`.
 
+Manual two-computer remediation steps (exact commands, firewall notes, validator):
+[`docs/runbooks/phase-0-evidence-remediation.md`](../docs/runbooks/phase-0-evidence-remediation.md).
+
+Validate archived client matrix evidence (rejects loopback-only files):
+
+```powershell
+python scripts/dev/validate_phase0_evidence.py --experiment b
+```
+
 ### Automated tests
 
 ```powershell
 pytest tests/unit/test_experiment_b_*.py tests/integration/test_experiment_b_tcp.py
+pytest tests/unit/test_phase0_evidence_validation.py
 ```
 
 ---
@@ -279,12 +289,13 @@ python experiments/experiment_c_screen_capture.py benchmark `
   --width 1280 `
   --height 720 `
   --backend dxgi `
-  --duration 60
+  --duration 60 `
+  --machine-label computer-a
 
 # JSON to stdout as well
 python experiments/experiment_c_screen_capture.py benchmark `
   --monitor 0 --backend dxgi --fps 30 --width 1280 --height 720 `
-  --duration 60 --json --no-preview
+  --duration 60 --json --no-preview --machine-label computer-a
 
 # Low / Balanced / High suite (no preview unless --show-preview)
 python experiments/experiment_c_screen_capture.py suite `
@@ -308,10 +319,12 @@ Ctrl+C release capture resources.
 **`benchmark` / `suite`** — console summary plus JSON files such as:
 
 ```text
-experiment-results/experiment-c/2026-08-06T160000_monitor-0_dxgi_balanced.json
+experiment-results/experiment-c/2026-08-06T160000_computer-a_monitor-0_dxgi_balanced.json
 ```
 
-Screenshots / frame pixels are **not** stored.
+Use `--machine-label computer-a` / `computer-b` so Phase 0 evidence can distinguish
+the two target PCs. Labels are sanitized for filenames; do not pass a Windows
+account name. Screenshots / frame pixels are **not** stored.
 
 ### Interpreting metrics
 

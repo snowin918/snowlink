@@ -40,6 +40,9 @@ webrtc = [
     "numpy>=1.26",
     "psutil>=5.9",
 ]
+ui = [
+    "PySide6>=6.6",
+]
 
 [project.scripts]
 snowlink = "snowlink.__main__:main"
@@ -70,3 +73,11 @@ python_version = "3.12"
 strict = true
 mypy_path = "src"
 packages = ["snowlink"]
+
+[[tool.mypy.overrides]]
+module = ["dxcam", "dxcam.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["PySide6", "PySide6.*"]
+ignore_missing_imports = true

@@ -29,7 +29,10 @@ from snowlink.media.capture_models import (  # noqa: E402
     utc_now_iso,
     validate_capture_configuration,
 )
-from snowlink.media.experiment_c_results import write_result  # noqa: E402
+from snowlink.media.experiment_c_results import (  # noqa: E402
+    sanitize_machine_label,
+    write_result,
+)
 from snowlink.media.screen_capture import run_capture_session  # noqa: E402
 from snowlink.platform_win.monitors import (  # noqa: E402
     MonitorEnumerationError,
@@ -47,6 +50,13 @@ def _print_json(data: Any) -> None:
 
 def _results_dir(args: argparse.Namespace) -> Path:
     return Path(args.results_dir)
+
+
+def _apply_machine_label(result: Any, args: argparse.Namespace) -> None:
+    raw = getattr(args, "machine_label", None)
+    if not raw:
+        return
+    result.machine_label = sanitize_machine_label(str(raw))
 
 
 def _config_from_args(
@@ -104,6 +114,7 @@ def _emit_result(
     *,
     write_file: bool,
 ) -> Path | None:
+    _apply_machine_label(result, args)
     path: Path | None = None
     if write_file:
         path = write_result(result, _results_dir(args))
@@ -113,6 +124,8 @@ def _emit_result(
         cfg = result.configuration
         status = "PASS" if result.success else "FAIL"
         print(f"Experiment C {status}")
+        if result.machine_label:
+            print(f"  machine_label={result.machine_label}")
         if cfg is not None:
             print(
                 f"  monitor={cfg.monitor} backend={cfg.backend} "
@@ -326,6 +339,15 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="Request cursor capture (WinRT only in DXcam)",
         )
+        p.add_argument(
+            "--machine-label",
+            default=None,
+            help=(
+                "Optional safe label to distinguish computers in results "
+                "(e.g. computer-a / computer-b). Sanitized for filenames; "
+                "do not pass a Windows account name."
+            ),
+        )
         p.add_argument("--json", action="store_true", help="Print result JSON to stdout")
         p.add_argument(
             "--results-dir",
@@ -382,6 +404,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show preview windows during the suite (off by default)",
     )
     p_suite.add_argument("--show-cursor", action="store_true")
+    p_suite.add_argument(
+        "--machine-label",
+        default=None,
+        help=(
+            "Optional safe label to distinguish computers in results "
+            "(e.g. computer-a / computer-b). Sanitized for filenames; "
+            "do not pass a Windows account name."
+        ),
+    )
     p_suite.add_argument("--json", action="store_true")
     p_suite.add_argument(
         "--results-dir",

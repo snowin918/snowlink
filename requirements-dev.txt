@@ -11,5 +11,8 @@
 # For Experiment E synthetic WebRTC video, also install: pip install -e ".[webrtc]"
 # For Experiment F synthetic WebRTC Opus audio, also install: pip install -e ".[webrtc]"
 #   (add .[audio] when audible WASAPI playback is needed)
+# For the PySide6 app shell: pip install -e ".[ui]"
+# Full local GUI + capture + experiments:
+#   pip install -e ".[dev,ui,capture,audio,webrtc]"
 
 -e ".[dev]"

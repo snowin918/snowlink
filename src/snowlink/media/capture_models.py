@@ -242,6 +242,7 @@ class ExperimentCResult:
     started_at_utc: str = field(default_factory=utc_now_iso)
     completed_at_utc: str | None = None
     success: bool = False
+    machine_label: str | None = None
     configuration: CaptureConfiguration | None = None
     capture: CaptureStats = field(default_factory=CaptureStats)
     render: RenderStats = field(default_factory=RenderStats)
@@ -266,6 +267,7 @@ class ExperimentCResult:
             "started_at_utc": self.started_at_utc,
             "completed_at_utc": self.completed_at_utc,
             "success": self.success,
+            "machine_label": self.machine_label,
             "configuration": (
                 self.configuration.to_dict() if self.configuration else None
             ),
@@ -302,12 +304,15 @@ class ExperimentCResult:
         ren_raw = data.get("render") or {}
         tim_raw = data.get("timing_ms") or {}
         res_raw = data.get("resources") or {}
+        raw_label = data.get("machine_label")
+        machine_label = None if raw_label is None else str(raw_label)
         return cls(
             experiment=str(data.get("experiment", EXPERIMENT_NAME)),
             schema_version=int(data.get("schema_version", 0)),
             started_at_utc=str(data.get("started_at_utc", "")),
             completed_at_utc=data.get("completed_at_utc"),
             success=bool(data.get("success", False)),
+            machine_label=machine_label,
             configuration=configuration,
             capture=CaptureStats(
                 native_width=int(cap_raw.get("native_width", 0)),

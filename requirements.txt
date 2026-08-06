@@ -1,0 +1,11 @@
+# Authoritative dependency versions live in pyproject.toml.
+# Do not add or pin package versions here.
+#
+# Maintain this file as a thin installer shim only:
+#   - Runtime dependencies: [project].dependencies in pyproject.toml
+#   - Install command:      pip install -e .
+#
+# When runtime third-party packages are added later, update pyproject.toml
+# first, then keep this file pointing at the editable install (no version lists).
+
+-e .

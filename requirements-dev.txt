@@ -1,0 +1,10 @@
+# Authoritative dependency versions live in pyproject.toml.
+# Do not add or pin package versions here.
+#
+# Maintain this file as a thin installer shim only:
+#   - Dev tools:       [project.optional-dependencies].dev in pyproject.toml
+#   - Install command: pip install -e ".[dev]"
+#
+# Includes the runtime package (editable) plus pytest, pytest-asyncio, ruff, and mypy.
+
+-e ".[dev]"

@@ -1,0 +1,11 @@
+# Snowlink default non-secret configuration
+
+signaling_port = 3847
+preset = "low"
+backend = "dxgi"
+enable_audio = true
+pairing_ttl_s = 180
+pairing_rate_limit_failures = 5
+pairing_rate_limit_window_s = 60
+max_signaling_message_bytes = 262144
+trickle_ice = false

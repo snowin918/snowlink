@@ -23,9 +23,9 @@ def main(argv: list[str] | None = None) -> int:
             "For local capture preview and Phase 0 diagnostics also install "
             "capture/audio/webrtc extras as needed, e.g.:\n"
             '  pip install -e ".[dev,ui,capture,audio,webrtc]"\n'
-            "\nPhase 1 screen CLI (no GUI):\n"
-            "  python -m snowlink share --bind-ip <LAN_IP>\n"
-            "  python -m snowlink view --remote-ip <LAN_IP>\n"
+            "\nPhase 3 screen CLI (no GUI):\n"
+            "  python -m snowlink share --bind-ip <LAN_IP> --auto-approve\n"
+            "  python -m snowlink view --remote-ip <LAN_IP> --pairing-code <CODE>\n"
             f"\nImport error: {exc}",
             file=sys.stderr,
         )

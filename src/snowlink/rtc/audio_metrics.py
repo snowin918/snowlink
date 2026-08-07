@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -124,7 +125,7 @@ class ToneAnalyzer:
         self.clipping_count = 0
         self.silent_frame_count = 0
         self.frames_analyzed = 0
-        self._freq_samples: list[float] = []
+        self._freq_samples: deque[float] = deque(maxlen=256)
         self._pcm_accum = np.zeros(0, dtype=np.float32)
         self._accum_target = max(sample_rate // 4, 2048)  # ~250 ms for FFT
 
@@ -142,8 +143,16 @@ class ToneAnalyzer:
         if is_silent_frame(arr):
             self.silent_frame_count += 1
             return
+        # Frequency estimation is for Experiment F tone checks only. Skip the
+        # FFT path on live screen-view (no expected frequency) to avoid
+        # growing PCM accumulators and CPU cost over multi-hour sessions.
+        if self.expected_frequency_hz is None:
+            return
         mono = np.mean(arr, axis=1) if arr.ndim == 2 else arr.reshape(-1)
         self._pcm_accum = np.concatenate([self._pcm_accum, mono.astype(np.float32)])
+        # Cap accumulator if somehow behind.
+        if self._pcm_accum.size > self._accum_target * 4:
+            self._pcm_accum = self._pcm_accum[-self._accum_target :]
         while self._pcm_accum.size >= self._accum_target:
             chunk = self._pcm_accum[: self._accum_target]
             self._pcm_accum = self._pcm_accum[self._accum_target :]

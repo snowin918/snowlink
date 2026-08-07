@@ -123,6 +123,30 @@ _CAUSES: dict[str, str] = {
     "INVALID_CONFIGURATION": (
         "One or more experiment configuration values are outside the allowed ranges."
     ),
+    "PAIRING_REJECTED": (
+        "The pairing code was rejected or the sharer denied the connection."
+    ),
+    "PAIRING_EXPIRED": (
+        "The pairing code expired before the viewer completed authentication."
+    ),
+    "PAIRING_RATE_LIMITED": (
+        "Too many failed pairing attempts from this address; wait and retry."
+    ),
+    "PROTOCOL_MISMATCH": (
+        "The peers negotiated incompatible signaling protocol versions."
+    ),
+    "UNEXPECTED_MESSAGE": (
+        "A signaling message arrived out of order or with an unexpected type."
+    ),
+    "VIEWER_SLOT_TAKEN": (
+        "Another viewer is already connected to this share session."
+    ),
+    "CAPTURE_FAILED": (
+        "Screen capture stopped unexpectedly (monitor disconnect or device error)."
+    ),
+    "AUDIO_DEVICE_CHANGED": (
+        "The selected audio loopback endpoint became unavailable during the session."
+    ),
 }
 
 _ACTIONS: dict[str, str] = {
@@ -230,6 +254,30 @@ _ACTIONS: dict[str, str] = {
     "INVALID_CONFIGURATION": (
         "Adjust duration, port, sample-rate, channels, frame-ms, gain, or timeout flags."
     ),
+    "PAIRING_REJECTED": (
+        "Confirm the 6-digit code shown on the sharer, then ask the sharer to Approve."
+    ),
+    "PAIRING_EXPIRED": (
+        "Ask the sharer to Stop and Start Sharing again to mint a fresh pairing code."
+    ),
+    "PAIRING_RATE_LIMITED": (
+        "Wait about a minute, then retry with the correct code from the sharer UI."
+    ),
+    "PROTOCOL_MISMATCH": (
+        "Upgrade both peers to the same Snowlink version and retry."
+    ),
+    "UNEXPECTED_MESSAGE": (
+        "Restart both peers; if it persists, capture sanitized logs from Diagnostics."
+    ),
+    "VIEWER_SLOT_TAKEN": (
+        "Disconnect the existing viewer, or stop and restart sharing on the sharer."
+    ),
+    "CAPTURE_FAILED": (
+        "Reconnect the display, then Stop and Start Sharing again."
+    ),
+    "AUDIO_DEVICE_CHANGED": (
+        "Stop sharing and re-select the system-audio loopback device, then restart."
+    ),
 }
 
 
@@ -265,6 +313,31 @@ def map_exception(exc: BaseException) -> WebRTCFailure:
     """Map a generic exception onto a structured WebRTC failure."""
     if isinstance(exc, WebRTCError):
         return exc.failure
+    try:
+        from snowlink.media.audio_errors import AudioError
+
+        if isinstance(exc, AudioError):
+            audio = exc.failure
+            mapped = {
+                "PYAUDIO_WPATCH_NOT_INSTALLED": "UNEXPECTED_WEBRTC_AUDIO_ERROR",
+                "WASAPI_NOT_AVAILABLE": "UNEXPECTED_WEBRTC_AUDIO_ERROR",
+                "NO_LOOPBACK_DEVICE": "PLAYBACK_DEVICE_NOT_FOUND",
+                "INVALID_CAPTURE_DEVICE": "PLAYBACK_DEVICE_NOT_FOUND",
+                "INVALID_PLAYBACK_DEVICE": "PLAYBACK_DEVICE_NOT_FOUND",
+                "CAPTURE_OPEN_FAILED": "CAPTURE_FAILED",
+                "PLAYBACK_OPEN_FAILED": "PLAYBACK_OPEN_FAILED",
+                "PLAYBACK_WRITE_FAILED": "PLAYBACK_WRITE_FAILED",
+                "DEVICE_DISCONNECTED": "CAPTURE_FAILED",
+            }.get(str(audio.code), "UNEXPECTED_WEBRTC_AUDIO_ERROR")
+            return failure_for(
+                mapped,
+                audio.message,
+                exception=exc,
+                likely_cause=audio.likely_cause or None,
+                suggested_next_step=audio.suggested_next_step or None,
+            )
+    except Exception:
+        pass
     name = type(exc).__name__
     text = str(exc).lower()
     if isinstance(exc, ModuleNotFoundError):
@@ -274,6 +347,19 @@ def map_exception(exc: BaseException) -> WebRTCFailure:
                 "AIORTC_NOT_INSTALLED",
                 "aiortc is not installed.",
                 exception=exc,
+            )
+        if "pyaudiowpatch" in mod or "_portaudiowpatch" in mod:
+            return failure_for(
+                "UNEXPECTED_WEBRTC_AUDIO_ERROR",
+                "PyAudioWPatch is not available in this build/environment.",
+                exception=exc,
+                likely_cause=(
+                    "System-audio support requires the pyaudiowpatch package. "
+                    "The GUI build must collect it explicitly."
+                ),
+                suggested_next_step=(
+                    'pip install -e ".[audio]" then rebuild, or run: python -m snowlink'
+                ),
             )
         if mod.endswith("'av'") or " no module named 'av'" in f" {mod}":
             return failure_for(

@@ -46,7 +46,19 @@ hiddenimports: list = [
 ]
 hiddenimports += collect_submodules("snowlink")
 
-for pkg in ("PySide6", "shiboken6", "dxcam", "cv2", "av", "aiortc", "aiohttp"):
+# Include media/audio stacks when present in the build venv. PyAudioWPatch
+# must be collect_all'd — analysis alone may pull only _portaudiowpatch.pyd
+# and omit the importable ``pyaudiowpatch`` package (breaks system-audio share).
+for pkg in (
+    "PySide6",
+    "shiboken6",
+    "dxcam",
+    "cv2",
+    "av",
+    "aiortc",
+    "aiohttp",
+    "pyaudiowpatch",
+):
     try:
         pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
         datas += pkg_datas
@@ -55,6 +67,12 @@ for pkg in ("PySide6", "shiboken6", "dxcam", "cv2", "av", "aiortc", "aiohttp"):
     except Exception:
         # Optional dependency not installed in the build environment.
         pass
+hiddenimports += [
+    "pyaudiowpatch",
+    "pyaudiowpatch.__main__",
+    "_portaudiowpatch",
+    "numpy",
+]
 
 a = Analysis(  # noqa: F821  # type: ignore[name-defined]
     [str(ENTRY)],

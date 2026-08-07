@@ -1,4 +1,4 @@
-"""CLI for screen share / view (HTTP signaling + DXcam + optional system audio)."""
+"""CLI for screen share / view (WebSocket signaling + pairing + optional audio)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Snowlink screen share / view (HTTP signaling; pairing arrives in Phase 3)",
+        description="Snowlink screen share / view (WebSocket signaling + pairing)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -38,6 +38,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Loopback capture device selector (default / index / substring)",
     )
     share.add_argument(
+        "--auto-approve",
+        action="store_true",
+        help="Skip interactive approval (tests / trusted lab only)",
+    )
+    share.add_argument(
+        "--pairing-code",
+        default=None,
+        help="Optional fixed 6-digit pairing code (default: random)",
+    )
+    share.add_argument(
         "--duration",
         type=float,
         default=0.0,
@@ -47,6 +57,11 @@ def _build_parser() -> argparse.ArgumentParser:
     view = sub.add_parser("view", help="View a remote screen share")
     view.add_argument("--remote-ip", required=True)
     view.add_argument("--port", type=int, default=3847)
+    view.add_argument(
+        "--pairing-code",
+        required=True,
+        help="6-digit pairing code shown on the sharer",
+    )
     view.add_argument("--source-ip", default=None, help="Optional local bind for signaling")
     view.add_argument("--no-preview", action="store_true")
     view.add_argument(
@@ -80,6 +95,15 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def _cli_approval(info: Any) -> bool:
+    print(f"Viewer from {info.remote_addr} presented the pairing code.")
+    try:
+        answer = await asyncio.to_thread(input, "Approve? [y/N]: ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in {"y", "yes"}
+
+
 async def _run_share(args: argparse.Namespace) -> int:
     from snowlink.rtc.screen_session import (
         ScreenShareConfiguration,
@@ -100,6 +124,9 @@ async def _run_share(args: argparse.Namespace) -> int:
         preset=args.preset,
         enable_audio=not args.no_audio,
         audio_capture_device=args.audio_device,
+        auto_approve=bool(args.auto_approve),
+        approval_handler=None if args.auto_approve else _cli_approval,
+        pairing_code=args.pairing_code,
     )
     stop = asyncio.Event()
 
@@ -136,6 +163,7 @@ async def _run_view(args: argparse.Namespace) -> int:
 
     config = ScreenViewConfiguration(
         remote_ip=args.remote_ip,
+        pairing_code=str(args.pairing_code),
         signaling_port=args.port,
         requested_source_ip=args.source_ip,
         preview=not args.no_preview,

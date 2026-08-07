@@ -36,7 +36,9 @@ def test_oldest_data_drop_behavior() -> None:
 
 
 def test_underrun_silence_insertion() -> None:
-    ring = AudioRingBuffer(capacity_frames=960, channels=2)
+    ring = AudioRingBuffer(capacity_frames=9600, channels=2)
+    # Seed enough audio for prebuffer, then stop writing so the worker underruns.
+    ring.write(np.zeros((4800, 2), dtype=np.float32))
     worker = PlaybackWorker(
         ring,
         sample_rate=48_000,
@@ -46,10 +48,34 @@ def test_underrun_silence_insertion() -> None:
         muted=False,
         write_pcm=None,
         enabled=False,
+        prebuffer_ms=40.0,
+        rebuffer_after_underruns=10_000,
     )
     worker.start()
-    time.sleep(0.08)
+    time.sleep(0.25)
     worker.stop(timeout=1.0)
+    assert worker.samples_played >= 960
     assert worker.underruns >= 1
     assert worker.silence_samples_inserted >= 960
+
+
+def test_playback_waits_for_prebuffer() -> None:
+    ring = AudioRingBuffer(capacity_frames=9600, channels=2)
+    worker = PlaybackWorker(
+        ring,
+        sample_rate=48_000,
+        channels=2,
+        frame_ms=20,
+        enabled=False,
+        prebuffer_ms=60.0,
+    )
+    worker.start()
+    time.sleep(0.05)
+    # Still waiting — no audio written yet.
+    assert worker.samples_played == 0
+    ring.write(np.zeros((4800, 2), dtype=np.float32))
+    time.sleep(0.12)
+    worker.stop(timeout=1.0)
     assert worker.samples_played >= 960
+    # Healthy start should not underrun every frame.
+    assert worker.underruns < worker.samples_played // 960

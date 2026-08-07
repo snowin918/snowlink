@@ -32,12 +32,22 @@ def host_only_configuration() -> Any:
     return RTCConfiguration(iceServers=[])
 
 
-def create_peer_connection() -> Any:
-    """Create an RTCPeerConnection configured for LAN host ICE only."""
+def create_peer_connection(*, preferred_host_ip: str | None = None) -> Any:
+    """Create an RTCPeerConnection configured for LAN host ICE only.
+
+    *preferred_host_ip* is stored on the connection for SDP host filtering after
+    ICE gathering (see :mod:`snowlink.rtc.ice_policy`).
+    """
     require_aiortc()
     from aiortc import RTCPeerConnection
 
-    return RTCPeerConnection(configuration=host_only_configuration())
+    pc = RTCPeerConnection(configuration=host_only_configuration())
+    pc._snowlink_preferred_host_ip = preferred_host_ip  # noqa: SLF001
+    return pc
+
+
+def preferred_host_ip_of(pc: Any) -> str | None:
+    return getattr(pc, "_snowlink_preferred_host_ip", None)
 
 
 def list_video_codecs() -> list[AvailableCodec]:

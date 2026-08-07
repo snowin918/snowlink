@@ -2,10 +2,10 @@
 
 Private LAN screen and system-audio share for Windows 11 (exactly two peers).
 
-**Phase 2 demo:** Share / View over LAN with **screen + system audio** (HTTP
-signaling, no pairing yet). Pairing codes arrive in Phase 3. Phase 0 gate is
-`GO` with constraints — see `docs/phase-0-go-no-go.md` (default capture preset
-is **Low** because Balanced may miss ~30 FPS on software capture).
+**Phase 3 demo:** Share / View over LAN with **screen + system audio**,
+**WebSocket signaling**, and **6-digit pairing + on-sharer approval**. Phase 0
+gate is `GO` with constraints — see `docs/phase-0-go-no-go.md` (default capture
+preset is **Low** because Balanced may miss ~30 FPS on software capture).
 
 ## Requirements
 
@@ -63,37 +63,43 @@ Or use the console script after editable install: `snowlink`.
 
 **Works now**
 
-- Home / Share / View / Diagnostics navigation
+- Home / Share / View / Diagnostics / Settings navigation
 - **Share:** Start Sharing / Stop (DXcam → VP8 + WASAPI loopback → Opus on selected LAN IP)
-- **View:** Connect / Disconnect (remote screen + system audio; Mute toggle)
+- **Pairing:** 6-digit code on sharer; viewer enters code; sharer Approve / Deny
+- **View:** Connect / Disconnect (remote screen + system audio; Mute; Fullscreen)
+- **Stats panel** on Share/View (FPS, resolution, bitrate, RTT, loss, drops, underruns, A/V skew)
+- **Settings** persisted under `%LOCALAPPDATA%\Snowlink\config.toml`
+- **Diagnostics:** product connectivity checklist (§6.5) + Lab Phase 0 Experiments A–F
 - Share: local Experiment C preview still available
-- Diagnostics: run Phase 0 Experiments **A–F**
+- Structured logging with secret redaction under `%LOCALAPPDATA%\Snowlink\logs\`
 
-**Not ready yet**
+**Reliability / packaging**
 
-- Pairing codes / product WebSocket signaling (Phase 3)
-- Full stats panel / Settings
-
+- Brief ICE disconnect recovery (`reconnecting`) on Share/View
+- Capture / selected-IP change surfaced with actionable errors
+- Portable PyInstaller onedir — see `docs/runbooks/ship-checklist.md`
+- Soak / acceptance: `docs/runbooks/mvp-acceptance.md`
 ### Two-PC GUI checklist (vpn-on-on)
 
 1. Enable VPN on both PCs; enable Allow LAN / split-tunnel if needed (`docs/vpn-lan-access.md`).
 2. On each PC: `pip install -e ".[ui,capture,audio,webrtc]"` then `python -m snowlink`.
-3. Share: pick physical LAN adapter + monitor + loopback device + preset (default **low**) → Start Sharing.
-4. View: enter sharer LAN IP + port (default 3847) → Connect → confirm remote screen + audio (keep gain low).
-5. Stop Sharing / Disconnect on both sides.
+3. Share: pick physical LAN adapter + monitor + loopback device + preset (default **low**) → Start Sharing → note **pairing code**.
+4. View: enter sharer LAN IP + port (default 3847) + pairing code → Connect.
+5. Sharer: **Approve** the viewer → confirm remote screen + audio (keep gain low).
+6. Stop Sharing / Disconnect on both sides.
 
-## Phase 2 CLI (no GUI)
+## Phase 3 CLI (no GUI)
 
 ```powershell
-# Sharer (bind to physical LAN IPv4)
+# Sharer (bind to physical LAN IPv4; --auto-approve for lab/tests only)
 python -m snowlink share --bind-ip 192.168.1.25 --port 3847 --preset low
 
-# Viewer (keep default gain 0.25; add --muted to start muted)
-python -m snowlink view --remote-ip 192.168.1.25 --port 3847
+# Viewer (pairing code printed / shown on sharer)
+python -m snowlink view --remote-ip 192.168.1.25 --port 3847 --pairing-code 483920
 
 # Video-only
-python -m snowlink share --bind-ip 192.168.1.25 --no-audio
-python -m snowlink view --remote-ip 192.168.1.25 --no-audio
+python -m snowlink share --bind-ip 192.168.1.25 --no-audio --auto-approve
+python -m snowlink view --remote-ip 192.168.1.25 --no-audio --pairing-code 483920
 ```
 
 ## Build the GUI app (windowed)

@@ -11,7 +11,7 @@ def test_import_ui_modules() -> None:
     from snowlink.ui import argv_builders, paths
     from snowlink.ui.app import run_app
     from snowlink.ui.main_window import MainWindow
-    from snowlink.ui.pages import diagnostics, home, share, view
+    from snowlink.ui.pages import diagnostics, home, settings, share, view
 
     assert callable(run_app)
     assert MainWindow is not None
@@ -19,5 +19,6 @@ def test_import_ui_modules() -> None:
     assert share.SharePage is not None
     assert view.ViewPage is not None
     assert diagnostics.DiagnosticsPage is not None
+    assert settings.SettingsPage is not None
     assert paths.repo_root().name  # non-empty
     assert "a" in argv_builders.SCRIPT_NAMES

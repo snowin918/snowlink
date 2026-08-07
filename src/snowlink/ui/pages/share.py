@@ -1,4 +1,4 @@
-"""Share page — local preview + LAN screen share (+ system audio)."""
+"""Share page — local preview + LAN screen share (+ system audio + pairing)."""
 
 from __future__ import annotations
 
@@ -20,12 +20,14 @@ from PySide6.QtWidgets import (
 
 from snowlink.ui.argv_builders import PRESETS, build_experiment_c_argv
 from snowlink.ui.paths import app_workdir, experiment_script
+from snowlink.ui.widgets.stats_panel import StatsPanel
 from snowlink.ui.workers import AsyncioSessionWorker, ExperimentProcessRunner
 
 
 class SharePage(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, preferences: Any | None = None) -> None:
         super().__init__()
+        self._preferences = preferences
         self._runner = ExperimentProcessRunner(self)
         self._runner.output.connect(self._on_output)
         self._runner.finished.connect(self._on_finished)
@@ -35,6 +37,7 @@ class SharePage(QWidget):
         self._session.state_changed.connect(self._on_session_state)
         self._session.finished.connect(self._on_session_finished)
         self._session.failed.connect(self._on_session_failed)
+        self._session.approval_requested.connect(self._on_approval_requested)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 28, 28, 28)
@@ -45,8 +48,8 @@ class SharePage(QWidget):
         layout.addWidget(title)
 
         warn = QLabel(
-            "Screen + system-audio share (no pairing yet). HTTP signaling on the "
-            "selected LAN IP — use only on your private LAN."
+            "Screen + system-audio share with WebSocket pairing. Bind to a physical "
+            "LAN IP. Approve the viewer when they present the 6-digit code."
         )
         warn.setObjectName("warningBanner")
         warn.setWordWrap(True)
@@ -72,7 +75,6 @@ class SharePage(QWidget):
 
         self._preset = QComboBox()
         self._preset.addItems(list(PRESETS))
-        # Experiment C Balanced ~21 FPS on lab host; Low is the Phase 1 demo default.
         self._preset.setCurrentText("low")
         form.addRow("Quality preset", self._preset)
 
@@ -84,6 +86,15 @@ class SharePage(QWidget):
         self._port.setRange(1, 65535)
         self._port.setValue(3847)
         form.addRow("Signaling port", self._port)
+
+        self._code_label = QLabel("—")
+        self._code_label.setObjectName("pairingCode")
+        form.addRow("Pairing code", self._code_label)
+
+        self._sharing_indicator = QLabel("")
+        self._sharing_indicator.setObjectName("sharingIndicator")
+        self._sharing_indicator.setVisible(False)
+        form.addRow("", self._sharing_indicator)
 
         layout.addWidget(form_box)
 
@@ -110,6 +121,16 @@ class SharePage(QWidget):
         self._stop_share_btn.setEnabled(False)
         self._stop_share_btn.clicked.connect(self._session.stop)
         row.addWidget(self._stop_share_btn)
+
+        self._approve_btn = QPushButton("Approve viewer")
+        self._approve_btn.setEnabled(False)
+        self._approve_btn.clicked.connect(lambda: self._session.respond_approval(True))
+        row.addWidget(self._approve_btn)
+
+        self._deny_btn = QPushButton("Deny")
+        self._deny_btn.setEnabled(False)
+        self._deny_btn.clicked.connect(lambda: self._session.respond_approval(False))
+        row.addWidget(self._deny_btn)
         row.addStretch(1)
         layout.addLayout(row)
 
@@ -117,9 +138,44 @@ class SharePage(QWidget):
         self._status.setObjectName("hint")
         self._status.setWordWrap(True)
         layout.addWidget(self._status)
+
+        self._stats = StatsPanel()
+        layout.addWidget(self._stats)
         layout.addStretch(1)
 
         self.refresh_devices()
+        self.apply_preferences(self._preferences)
+
+    def apply_preferences(self, prefs: Any | None) -> None:
+        self._preferences = prefs
+        if prefs is None:
+            return
+        try:
+            self._port.setValue(int(getattr(prefs, "signaling_port", 3847)))
+            preset = str(getattr(prefs, "preset", "low"))
+            idx = self._preset.findText(preset)
+            if idx >= 0:
+                self._preset.setCurrentIndex(idx)
+            backend = str(getattr(prefs, "backend", "dxgi"))
+            bidx = self._backend.findText(backend)
+            if bidx >= 0:
+                self._backend.setCurrentIndex(bidx)
+            self._enable_audio.setChecked(bool(getattr(prefs, "enable_audio", True)))
+            monitor = int(getattr(prefs, "share_monitor", 0))
+            for i in range(self._monitor.count()):
+                if self._monitor.itemData(i) == monitor:
+                    self._monitor.setCurrentIndex(i)
+                    break
+            bind_ip = getattr(prefs, "preferred_bind_ip", None)
+            if bind_ip:
+                for i in range(self._adapter.count()):
+                    adapter = self._adapter.itemData(i)
+                    addrs = getattr(adapter, "ipv4_addresses", None) or []
+                    if any(str(a.address) == str(bind_ip) for a in addrs):
+                        self._adapter.setCurrentIndex(i)
+                        break
+        except Exception:
+            pass
 
     def refresh_devices(self) -> None:
         self._adapter.clear()
@@ -171,10 +227,25 @@ class SharePage(QWidget):
         try:
             from snowlink.platform_win.audio_endpoints import enumerate_audio_endpoints
 
-            for ep in enumerate_audio_endpoints():
+            endpoints = enumerate_audio_endpoints()
+            default_out_idx = next(
+                (
+                    ep.index
+                    for ep in endpoints
+                    if getattr(ep, "is_default_output", False)
+                    and getattr(ep, "can_playback", False)
+                ),
+                None,
+            )
+            for ep in endpoints:
                 if not getattr(ep, "is_loopback", False) or not getattr(ep, "can_capture", False):
                     continue
-                label = f"{ep.index}: {ep.name}"
+                flags: list[str] = []
+                assoc_idx = getattr(ep, "associated_output_index", None)
+                if default_out_idx is not None and assoc_idx == default_out_idx:
+                    flags.append("ACTIVE OUTPUT")
+                flag_s = f" [{', '.join(flags)}]" if flags else ""
+                label = f"{ep.index}: {ep.name}{flag_s}"
                 self._audio_device.addItem(label, str(ep.index))
         except Exception as exc:  # noqa: BLE001
             self._status.setText(f"Audio endpoint list unavailable: {exc}")
@@ -222,6 +293,18 @@ class SharePage(QWidget):
         if not bind_ip:
             QMessageBox.warning(self, "No IP", "Select an adapter with an IPv4 address.")
             return
+        confirm = QMessageBox.question(
+            self,
+            "Start sharing?",
+            "Snowlink will capture this computer’s screen"
+            + (" and system audio" if self._enable_audio.isChecked() else "")
+            + " and stream it to one approved viewer on the LAN.\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
         monitor = self._monitor.currentData()
         monitor_index = int(monitor) if monitor is not None else 0
         preset = self._preset.currentText()
@@ -229,6 +312,7 @@ class SharePage(QWidget):
         port = int(self._port.value())
         enable_audio = self._enable_audio.isChecked()
         audio_device = self._audio_device.currentData() or "default"
+        worker = self._session
 
         def factory(stop_event: Any, on_state: Any, _on_frame: Any) -> Any:
             from snowlink.rtc.screen_session import (
@@ -244,6 +328,8 @@ class SharePage(QWidget):
                 preset=preset,
                 enable_audio=enable_audio,
                 audio_capture_device=str(audio_device),
+                auto_approve=False,
+                approval_handler=worker.request_approval,
             )
             return run_screen_share(config, stop_event=stop_event, on_state=on_state)
 
@@ -252,10 +338,17 @@ class SharePage(QWidget):
             self._share_btn.setEnabled(False)
             self._stop_share_btn.setEnabled(True)
             self._preview_btn.setEnabled(False)
+            self._code_label.setText("…")
             media = "screen+audio" if enable_audio else "screen"
             self._status.setText(f"Starting {media} share on {bind_ip}:{port}...")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Share failed", str(exc))
+
+    def _on_approval_requested(self, info: Any) -> None:
+        remote = getattr(info, "remote_addr", "?")
+        self._approve_btn.setEnabled(True)
+        self._deny_btn.setEnabled(True)
+        self._status.setText(f"Viewer from {remote} entered the code. Approve or Deny.")
 
     def _on_started(self, command: str) -> None:
         self._preview_btn.setEnabled(False)
@@ -275,6 +368,9 @@ class SharePage(QWidget):
         self._status.setText(f"Preview exited with code {code}.")
 
     def _on_session_state(self, state: Any) -> None:
+        code = getattr(state, "pairing_code", None)
+        if code:
+            self._code_label.setText(str(code))
         detail = getattr(state, "detail", "") or getattr(state, "phase", "")
         frames = getattr(state, "frames", 0)
         audio_frames = getattr(state, "audio_frames", 0)
@@ -282,16 +378,38 @@ class SharePage(QWidget):
         self._status.setText(
             f"[{phase}] {detail} (video={frames}, audio={audio_frames})"
         )
+        sharing = bool(getattr(state, "sharing_active", False)) or phase in {
+            "waiting_for_viewer",
+            "awaiting_approval",
+            "negotiating",
+            "sharing",
+        }
+        self._sharing_indicator.setVisible(sharing)
+        if sharing:
+            self._sharing_indicator.setText("● SHARING — this computer’s screen may be visible")
+        self._stats.update_from_state(state)
+        if phase != "awaiting_approval":
+            self._approve_btn.setEnabled(False)
+            self._deny_btn.setEnabled(False)
 
     def _on_session_finished(self, _state: Any) -> None:
         self._share_btn.setEnabled(True)
         self._stop_share_btn.setEnabled(False)
         self._preview_btn.setEnabled(True)
+        self._approve_btn.setEnabled(False)
+        self._deny_btn.setEnabled(False)
+        self._code_label.setText("—")
+        self._sharing_indicator.setVisible(False)
+        self._stats.clear()
         self._status.setText("Sharing stopped.")
 
     def _on_session_failed(self, message: str) -> None:
         self._share_btn.setEnabled(True)
         self._stop_share_btn.setEnabled(False)
         self._preview_btn.setEnabled(True)
+        self._approve_btn.setEnabled(False)
+        self._deny_btn.setEnabled(False)
+        self._sharing_indicator.setVisible(False)
+        self._stats.clear()
         self._status.setText(message)
         QMessageBox.critical(self, "Share failed", message)

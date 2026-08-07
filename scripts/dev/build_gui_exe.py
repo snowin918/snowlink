@@ -20,9 +20,10 @@ def main() -> int:
 
     print(f"Repository: {REPO_ROOT}")
     print(f"Python: {sys.executable}")
-    print('Ensuring GUI + packaging deps (pip install -e ".[dev,ui]")...')
+    extras = ".[dev,ui,capture,audio,webrtc]"
+    print(f'Ensuring GUI + media + packaging deps (pip install -e "{extras}")...')
     subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "-e", ".[dev,ui]"],
+        [sys.executable, "-m", "pip", "install", "-e", extras],
         cwd=REPO_ROOT,
     )
 
@@ -50,7 +51,8 @@ def main() -> int:
     print(f"Built GUI app folder: {DIST / 'Snowlink'}")
     print(f"Launch: {exe}")
     print("Distribute the whole Snowlink/ folder (onedir), not only the exe.")
-    print("LAN Share/View streaming is still Phase 1 (not ready).")
+    print("MVP Share/View includes screen + system audio + pairing when the build")
+    print("venv has capture/audio/webrtc extras (installed automatically above).")
     return 0
 
 

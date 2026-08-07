@@ -18,6 +18,7 @@ import asyncio
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -34,52 +35,76 @@ logger = logging.getLogger(__name__)
 
 
 def audio_frame_to_float32(frame: Any) -> NDArray[np.float32]:
-    """Convert a PyAV / aiortc AudioFrame to interleaved float32 ``(n, ch)``."""
+    """Convert a PyAV / aiortc AudioFrame to interleaved float32 ``(n, ch)``.
+
+    PyAV ``to_ndarray()`` layouts we must handle:
+
+    - packed ``s16`` stereo → shape ``(1, samples * channels)``
+    - planar ``s16p`` / ``fltp`` → shape ``(channels, samples)``
+    - already interleaved → shape ``(samples, channels)``
+    - mono → shape ``(1, samples)`` or ``(samples,)``
+    """
+    layout = getattr(frame, "layout", None)
+    channels = int(getattr(layout, "nb_channels", 0) or 0)
+    samples = int(getattr(frame, "samples", 0) or 0)
+
     try:
-        # Prefer ndarray path when available (layout-aware).
         arr = frame.to_ndarray()
     except Exception:
         arr = None
+
     if arr is not None:
         data = np.asarray(arr)
-        # PyAV may return planar (channels, samples) or interleaved.
-        layout = getattr(frame, "layout", None)
-        channels = int(getattr(layout, "nb_channels", 0) or 0)
+
+        def _as_float(x: NDArray[Any]) -> NDArray[np.float32]:
+            if x.dtype == np.int16:
+                return x.astype(np.float32) / 32768.0
+            if x.dtype == np.int32:
+                return x.astype(np.float32) / 2147483648.0
+            return x.astype(np.float32)
+
         if data.ndim == 1:
+            f = _as_float(data)
             if channels <= 1:
-                return data.reshape(-1, 1).astype(np.float32) / (
-                    32768.0 if data.dtype == np.int16 else 1.0
-                )
-            # Interleaved packed.
-            if data.dtype == np.int16:
-                f = data.astype(np.float32) / 32768.0
-            else:
-                f = data.astype(np.float32)
-            if channels > 1:
-                usable = (f.size // channels) * channels
-                return f[:usable].reshape(-1, channels)
-            return f.reshape(-1, 1)
+                return f.reshape(-1, 1)
+            usable = (f.size // channels) * channels
+            return f[:usable].reshape(-1, channels)
+
         if data.ndim == 2:
-            # Planar: (channels, samples) → interleaved.
-            if data.shape[0] <= 8 and (channels == 0 or data.shape[0] == channels):
-                planar = data
-                if planar.dtype == np.int16:
-                    planar = planar.astype(np.float32) / 32768.0
-                else:
-                    planar = planar.astype(np.float32)
+            # Packed interleaved in one row: (1, samples*channels) — common for s16.
+            if (
+                channels > 1
+                and data.shape[0] == 1
+                and data.shape[1] % channels == 0
+            ):
+                f = _as_float(data.reshape(-1))
+                return f.reshape(-1, channels)
+
+            # True planar: (channels, samples).
+            if channels > 0 and data.shape[0] == channels:
+                planar = _as_float(data)
                 return np.ascontiguousarray(planar.T)
-            # Already interleaved (samples, channels).
-            if data.dtype == np.int16:
-                return data.astype(np.float32) / 32768.0
-            return data.astype(np.float32)
+
+            # Already interleaved: (samples, channels).
+            if channels > 0 and data.shape[1] == channels:
+                return _as_float(data)
+
+            # Mono planar-ish: (1, samples).
+            if channels <= 1 and data.shape[0] == 1:
+                return _as_float(data.reshape(-1, 1))
+
+            # Last resort: if width matches sample count, treat as planar-ish.
+            if samples > 0 and data.shape[1] == samples:
+                return np.ascontiguousarray(_as_float(data).T)
+
+            return _as_float(data)
 
     # Fallback: raw plane bytes as s16 interleaved.
     raw = bytes(frame.planes[0])
-    layout = getattr(frame, "layout", None)
-    channels = int(getattr(layout, "nb_channels", 1) or 1)
-    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-    usable = (samples.size // channels) * channels
-    return samples[:usable].reshape(-1, channels)
+    channels = channels if channels >= 1 else 1
+    decoded = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    usable = (decoded.size // channels) * channels
+    return decoded[:usable].reshape(-1, channels)
 
 
 def validate_received_audio_frame(
@@ -160,12 +185,14 @@ class RemoteAudioConsumer:
         self.frames_received = 0
         self.samples_received = 0
         self.frame_sample_count_mismatches = 0
+        self.peak_level = 0.0
         self.received_sample_rate: int | None = None
         self.received_channels: int | None = None
         self.received_format: str | None = None
         self.first_frame_at_ns: int | None = None
         self.last_frame_at_ns: int | None = None
-        self.fill_ms_samples: list[float] = []
+        # Bounded — live view can run for hours at ~50 appends/s.
+        self.fill_ms_samples: deque[float] = deque(maxlen=600)
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._track: Any | None = None
@@ -211,7 +238,19 @@ class RemoteAudioConsumer:
                 except Exception as exc:
                     # MediaStreamError / connection end.
                     if not self._stop.is_set():
-                        logger.debug("remote audio recv ended: %s", exc)
+                        if self.frames_received == 0:
+                            logger.warning(
+                                "remote audio recv ended before any frames: %s", exc
+                            )
+                            self._fatal = WebRTCError(
+                                failure_for(
+                                    "UNEXPECTED_WEBRTC_AUDIO_ERROR",
+                                    "Remote audio track ended before any frames arrived.",
+                                    exception=exc,
+                                )
+                            )
+                        else:
+                            logger.debug("remote audio recv ended: %s", exc)
                     break
                 self._handle_frame(frame)
         except asyncio.CancelledError:
@@ -267,6 +306,12 @@ class RemoteAudioConsumer:
             pcm = resampled
 
         self.ring.write(pcm)
+        try:
+            peak = float(np.max(np.abs(pcm))) if pcm.size else 0.0
+            if peak > self.peak_level:
+                self.peak_level = peak
+        except Exception:
+            pass
         fill = self.ring.fill_frames()
         self.fill_ms_samples.append(fill * 1000.0 / float(self.sample_rate))
 
@@ -283,7 +328,15 @@ class RemoteAudioConsumer:
 
 
 class PlaybackWorker:
-    """Pull from the ring buffer on a wall-clock schedule for WASAPI playback."""
+    """Pull from the ring buffer on a wall-clock schedule for WASAPI playback.
+
+    Waits for a short prebuffer before starting the wall clock so the first
+    seconds are not pure underrun silence. If underruns persist, re-prebuffers
+    and resets the clock instead of racing forever ahead of the receiver.
+
+    When *playback_endpoint* is set, the WASAPI output stream is opened and
+    written on this worker thread (required for reliable Windows WASAPI output).
+    """
 
     def __init__(
         self,
@@ -297,6 +350,9 @@ class PlaybackWorker:
         write_pcm: Callable[[NDArray[np.float32]], None] | None = None,
         enabled: bool = True,
         controls: Any | None = None,
+        prebuffer_ms: float = 80.0,
+        rebuffer_after_underruns: int = 25,
+        playback_endpoint: Any | None = None,
     ) -> None:
         self.ring = ring
         self.sample_rate = int(sample_rate)
@@ -308,9 +364,14 @@ class PlaybackWorker:
         self.controls = controls
         self.write_pcm = write_pcm
         self.enabled = bool(enabled)
+        self.prebuffer_ms = float(prebuffer_ms)
+        self.rebuffer_after_underruns = int(rebuffer_after_underruns)
+        self.playback_endpoint = playback_endpoint
         self.samples_played = 0
         self.silence_samples_inserted = 0
         self.underruns = 0
+        self.peak_level = 0.0
+        self._player: Any | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._fatal: BaseException | None = None
@@ -325,7 +386,7 @@ class PlaybackWorker:
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run,
-            name="exp-f-audio-playback",
+            name="snowlink-audio-playback",
             daemon=True,
         )
         self._thread.start()
@@ -337,11 +398,73 @@ class PlaybackWorker:
         self._thread = None
         if thread is not None and thread.is_alive():
             thread.join(timeout=timeout)
+        self._close_player()
+
+    def _close_player(self) -> None:
+        player = self._player
+        self._player = None
+        if player is None:
+            return
+        try:
+            player.close()
+        except Exception:
+            logger.debug("playback player close failed", exc_info=True)
+
+    def _prebuffer_frames(self) -> int:
+        return max(
+            self.frame_samples,
+            int(self.sample_rate * self.prebuffer_ms / 1000.0),
+        )
+
+    def _wait_for_prebuffer(self) -> bool:
+        """Block until the ring has enough audio, or stop is requested.
+
+        Returns False if stopped before the target fill was reached.
+        """
+        target = self._prebuffer_frames()
+        while not self._stop.is_set():
+            if self.ring.closed:
+                return False
+            if self.ring.fill_frames() >= target:
+                return True
+            if self._stop.wait(timeout=0.005):
+                return False
+        return False
+
+    def _open_player_on_worker_thread(self) -> None:
+        if self.playback_endpoint is None:
+            return
+        from snowlink.media.audio_format import float32_to_s16
+        from snowlink.media.audio_playback import AudioPlayer
+
+        player = AudioPlayer(
+            self.playback_endpoint,
+            sample_rate=self.sample_rate,
+            channels=self.channels,
+            frames_per_buffer=self.frame_samples,
+        )
+        player.open()
+        player.start()
+        self._player = player
+
+        def _write(pcm: NDArray[np.float32]) -> None:
+            assert self._player is not None
+            self._player.write_s16(float32_to_s16(pcm))
+
+        self.write_pcm = _write
 
     def _run(self) -> None:
-        start = time.perf_counter()
-        index = 0
         try:
+            # Fill the jitter buffer before opening WASAPI so a slow device open
+            # cannot leave us blocked with an empty prebuffer forever.
+            if not self._wait_for_prebuffer():
+                return
+            if self.playback_endpoint is not None:
+                logger.info("PlaybackWorker prebuffer ready; opening WASAPI output")
+                self._open_player_on_worker_thread()
+            start = time.perf_counter()
+            index = 0
+            consecutive_underruns = 0
             while not self._stop.is_set():
                 target = start + index * self.frame_duration_s
                 delay = target - time.perf_counter()
@@ -355,6 +478,23 @@ class PlaybackWorker:
                 if underrun:
                     self.underruns += 1
                     self.silence_samples_inserted += self.frame_samples
+                    consecutive_underruns += 1
+                    if consecutive_underruns >= self.rebuffer_after_underruns:
+                        # Clock ran ahead of the jitter buffer — wait and resync.
+                        if not self._wait_for_prebuffer():
+                            break
+                        start = time.perf_counter()
+                        index = 0
+                        consecutive_underruns = 0
+                        continue
+                else:
+                    consecutive_underruns = 0
+                    try:
+                        peak = float(np.max(np.abs(data)))
+                        if peak > self.peak_level:
+                            self.peak_level = peak
+                    except Exception:
+                        pass
                 gain = float(getattr(self.controls, "gain", self.gain))
                 muted = bool(getattr(self.controls, "muted", self.muted))
                 pcm = apply_gain(data, gain, muted=muted or not self.enabled)
@@ -364,3 +504,6 @@ class PlaybackWorker:
                 index += 1
         except BaseException as exc:
             self._fatal = exc
+            logger.exception("PlaybackWorker failed")
+        finally:
+            self._close_player()

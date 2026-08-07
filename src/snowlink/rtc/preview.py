@@ -20,6 +20,7 @@ class DecodedFrame:
     sequence: int | None
     received_at_ns: int
     pts: int | None = None
+    pts_ms: float | None = None
 
 
 _SEQ_RE = re.compile(r"seq=(\d+)")
@@ -81,11 +82,23 @@ class RemoteVideoConsumer:
             self.frames_decoded += 1
             # Local monotonic receive counter (cross-machine seq is in the HUD).
             self._sequence_counter += 1
+            pts = getattr(frame, "pts", None)
+            pts_ms: float | None = None
+            if pts is not None:
+                tb = getattr(frame, "time_base", None)
+                try:
+                    if tb is not None:
+                        pts_ms = float(pts) * float(tb) * 1000.0
+                    else:
+                        pts_ms = float(pts) * 1000.0 / 90000.0
+                except Exception:
+                    pts_ms = None
             decoded = DecodedFrame(
                 bgr=img,
                 sequence=self._sequence_counter,
                 received_at_ns=recv_ns,
-                pts=getattr(frame, "pts", None),
+                pts=int(pts) if pts is not None else None,
+                pts_ms=pts_ms,
             )
             self.slot.publish(decoded, captured_at_ns=recv_ns)
 

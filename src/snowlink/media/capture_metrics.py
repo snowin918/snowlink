@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import statistics
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
 from snowlink.media.capture_models import ResourceStats, TimingStatsMs
+
+# Live share runs for hours — keep only a recent window of samples.
+_TIMING_SAMPLE_LIMIT = 1_200
 
 
 def percentile(samples: list[float], pct: float) -> float | None:
@@ -36,12 +40,24 @@ def average(samples: list[float]) -> float | None:
 
 @dataclass(slots=True)
 class TimingAccumulator:
-    """Collect high-resolution duration samples (stored as milliseconds)."""
+    """Collect high-resolution duration samples (stored as milliseconds).
 
-    capture_intervals_ms: list[float] = field(default_factory=list)
-    frame_ages_ms: list[float] = field(default_factory=list)
-    scale_times_ms: list[float] = field(default_factory=list)
-    capture_to_preview_ms: list[float] = field(default_factory=list)
+    Sample lists are ring-bounded so live multi-hour share sessions cannot
+    grow RSS without bound.
+    """
+
+    capture_intervals_ms: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_TIMING_SAMPLE_LIMIT)
+    )
+    frame_ages_ms: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_TIMING_SAMPLE_LIMIT)
+    )
+    scale_times_ms: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_TIMING_SAMPLE_LIMIT)
+    )
+    capture_to_preview_ms: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_TIMING_SAMPLE_LIMIT)
+    )
 
     def add_capture_interval_ns(self, interval_ns: int) -> None:
         if interval_ns >= 0:
@@ -60,20 +76,24 @@ class TimingAccumulator:
             self.capture_to_preview_ms.append(delay_ns / 1_000_000.0)
 
     def to_timing_stats(self) -> TimingStatsMs:
+        intervals = list(self.capture_intervals_ms)
+        ages = list(self.frame_ages_ms)
+        scales = list(self.scale_times_ms)
+        preview = list(self.capture_to_preview_ms)
         return TimingStatsMs(
-            capture_interval_average=average(self.capture_intervals_ms),
-            capture_interval_p50=percentile(self.capture_intervals_ms, 50),
-            capture_interval_p95=percentile(self.capture_intervals_ms, 95),
-            capture_interval_p99=percentile(self.capture_intervals_ms, 99),
-            frame_age_average=average(self.frame_ages_ms),
-            frame_age_p50=percentile(self.frame_ages_ms, 50),
-            frame_age_p95=percentile(self.frame_ages_ms, 95),
-            frame_age_p99=percentile(self.frame_ages_ms, 99),
-            scale_average=average(self.scale_times_ms),
-            scale_p50=percentile(self.scale_times_ms, 50),
-            scale_p95=percentile(self.scale_times_ms, 95),
-            capture_to_preview_average=average(self.capture_to_preview_ms),
-            capture_to_preview_p95=percentile(self.capture_to_preview_ms, 95),
+            capture_interval_average=average(intervals),
+            capture_interval_p50=percentile(intervals, 50),
+            capture_interval_p95=percentile(intervals, 95),
+            capture_interval_p99=percentile(intervals, 99),
+            frame_age_average=average(ages),
+            frame_age_p50=percentile(ages, 50),
+            frame_age_p95=percentile(ages, 95),
+            frame_age_p99=percentile(ages, 99),
+            scale_average=average(scales),
+            scale_p50=percentile(scales, 50),
+            scale_p95=percentile(scales, 95),
+            capture_to_preview_average=average(preview),
+            capture_to_preview_p95=percentile(preview, 95),
         )
 
 

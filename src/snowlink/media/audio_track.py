@@ -229,6 +229,7 @@ class LoopbackAudioTrack(AudioStreamTrack):
         self._silence_frames = 0
         self._underruns = 0
         self._late_events = 0
+        self.peak_level = 0.0
         self._stopped = False
         self._stop_event = asyncio.Event()
         self._pending_frames: list[Any] = []
@@ -317,6 +318,12 @@ class LoopbackAudioTrack(AudioStreamTrack):
             from snowlink.media.audio_format import float32_to_s16
 
             pcm = float32_to_s16(pcm.astype(np.float32))
+        try:
+            peak = float(np.max(np.abs(pcm.astype(np.float32) / 32768.0)))
+            if peak > self.peak_level:
+                self.peak_level = peak
+        except Exception:
+            pass
 
         pts = int(media_frame.pts)
         if pts <= self._last_pts:

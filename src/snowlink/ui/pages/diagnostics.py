@@ -1,9 +1,11 @@
-"""Diagnostics page — Phase 0 Experiments A–F runner."""
+"""Diagnostics page — product connectivity checklist + Phase 0 lab runner."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
+from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -22,35 +24,134 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from snowlink.constants import DEFAULT_SIGNALING_PORT
 from snowlink.ui import argv_builders as ab
 from snowlink.ui.paths import app_workdir, experiment_script, results_dir
 from snowlink.ui.workers import ExperimentProcessRunner
+
+
+class _ChecklistWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        selected_ip: str,
+        port: int,
+        remote_ip: str | None,
+        skip_handshake: bool,
+        live: Any | None,
+    ) -> None:
+        super().__init__()
+        self._selected_ip = selected_ip
+        self._port = port
+        self._remote_ip = remote_ip
+        self._skip_handshake = skip_handshake
+        self._live = live
+
+    def run(self) -> None:
+        try:
+            from snowlink.diagnostics.workflow import run_connectivity_checklist
+
+            report = run_connectivity_checklist(
+                selected_ip=self._selected_ip,
+                port=self._port,
+                remote_ip=self._remote_ip,
+                live=self._live,
+                skip_handshake=self._skip_handshake,
+            )
+            self.finished.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
 
 
 class DiagnosticsPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._runner = ExperimentProcessRunner(self)
-        self._runner.output.connect(self._append_log)
-        self._runner.finished.connect(self._on_finished)
-        self._runner.started.connect(self._on_started)
+        self._runner.output.connect(self._append_lab_log)
+        self._runner.finished.connect(self._on_lab_finished)
+        self._runner.started.connect(self._on_lab_started)
         self._builders: dict[str, Callable[[], tuple[str, list[str]]]] = {}
+        self._live_snapshot: Any | None = None
+        self._checklist_thread: QThread | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        title = QLabel("Diagnostics / Phase 0 Tests")
+        title = QLabel("Diagnostics")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
 
         hint = QLabel(
-            "Runs the real experiment scripts under experiments/ via the project "
-            "Python interpreter. Results stay under experiment-results/ (gitignored)."
+            "Product checklist verifies LAN bind, signaling, ICE/media (when a session "
+            "is live), and firewall. Lab tabs run Phase 0 Experiments A–F."
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
+
+        self._outer = QTabWidget()
+        self._outer.addTab(self._build_product_tab(), "Connectivity")
+        self._outer.addTab(self._build_lab_tabs(), "Lab (Phase 0)")
+        layout.addWidget(self._outer, 1)
+
+    def set_live_session_snapshot(self, snapshot: Any | None) -> None:
+        """Optional Share/View snapshot for ICE / media checklist steps."""
+        self._live_snapshot = snapshot
+
+    def _build_product_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        form = QFormLayout()
+
+        self._adapter = QComboBox()
+        self._adapter.setMinimumWidth(360)
+        form.addRow("Network adapter", self._adapter)
+
+        self._diag_port = QSpinBox()
+        self._diag_port.setRange(1, 65535)
+        self._diag_port.setValue(DEFAULT_SIGNALING_PORT)
+        form.addRow("Signaling port", self._diag_port)
+
+        self._remote_ip = QLineEdit()
+        self._remote_ip.setPlaceholderText("optional — remote sharer IP for handshake")
+        form.addRow("Remote IP", self._remote_ip)
+
+        self._skip_handshake = QCheckBox("Skip signaling handshake probe")
+        form.addRow("", self._skip_handshake)
+        layout.addLayout(form)
+
+        row = QHBoxLayout()
+        refresh = QPushButton("Refresh adapters")
+        refresh.clicked.connect(self._refresh_adapters)
+        row.addWidget(refresh)
+
+        self._run_checklist_btn = QPushButton("Run connectivity checklist")
+        self._run_checklist_btn.setObjectName("primaryButton")
+        self._run_checklist_btn.clicked.connect(self._run_checklist)
+        row.addWidget(self._run_checklist_btn)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        self._product_log = QPlainTextEdit()
+        self._product_log.setObjectName("logView")
+        self._product_log.setReadOnly(True)
+        layout.addWidget(self._product_log, 1)
+
+        self._product_status = QLabel("Idle.")
+        self._product_status.setObjectName("hint")
+        layout.addWidget(self._product_status)
+
+        self._refresh_adapters()
+        return w
+
+    def _build_lab_tabs(self) -> QWidget:
+        outer = QWidget()
+        layout = QVBoxLayout(outer)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         self._tabs = QTabWidget()
         self._tabs.addTab(self._build_tab_a(), "A Adapters")
@@ -84,30 +185,111 @@ class DiagnosticsPage(QWidget):
         self._log = QPlainTextEdit()
         self._log.setObjectName("logView")
         self._log.setReadOnly(True)
-        self._log.setMinimumHeight(200)
+        self._log.setMinimumHeight(160)
         layout.addWidget(self._log, 2)
         clear.clicked.connect(self._log.clear)
 
         self._status = QLabel("Idle.")
         self._status.setObjectName("hint")
         layout.addWidget(self._status)
+        return outer
 
-    def _append_log(self, text: str) -> None:
+    def _refresh_adapters(self) -> None:
+        self._adapter.clear()
+        try:
+            from snowlink.platform_win.adapters import enumerate_adapters, is_windows
+
+            if is_windows():
+                for adapter in enumerate_adapters():
+                    ipv4s = (
+                        ", ".join(a.address for a in adapter.ipv4_addresses)
+                        or "(no IPv4)"
+                    )
+                    cat = (
+                        adapter.category.value
+                        if hasattr(adapter.category, "value")
+                        else str(adapter.category)
+                    )
+                    label = f"{adapter.friendly_name} [{cat}] - {ipv4s}"
+                    self._adapter.addItem(label, adapter)
+            else:
+                self._adapter.addItem("(adapter list requires Windows)", None)
+        except Exception as exc:  # noqa: BLE001
+            self._adapter.addItem(f"(adapter error: {exc})", None)
+
+    def _selected_bind_ip(self) -> str | None:
+        adapter = self._adapter.currentData()
+        if adapter is None:
+            return None
+        addrs = getattr(adapter, "ipv4_addresses", None) or []
+        if not addrs:
+            return None
+        return str(addrs[0].address)
+
+    def _run_checklist(self) -> None:
+        if self._checklist_thread is not None and self._checklist_thread.isRunning():
+            QMessageBox.warning(self, "Busy", "Checklist is already running.")
+            return
+        bind_ip = self._selected_bind_ip()
+        if not bind_ip:
+            QMessageBox.warning(self, "No IP", "Select an adapter with an IPv4 address.")
+            return
+        remote = self._remote_ip.text().strip() or None
+        port = int(self._diag_port.value())
+        self._run_checklist_btn.setEnabled(False)
+        self._product_status.setText("Running checklist…")
+        self._product_log.clear()
+        self._product_log.appendPlainText(f"Selected {bind_ip}:{port}…\n")
+
+        thread = QThread(self)
+        worker = _ChecklistWorker(
+            selected_ip=bind_ip,
+            port=port,
+            remote_ip=remote,
+            skip_handshake=self._skip_handshake.isChecked(),
+            live=self._live_snapshot,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_checklist_finished)
+        worker.failed.connect(self._on_checklist_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._checklist_thread = thread
+        thread.start()
+
+    def _on_checklist_finished(self, report: Any) -> None:
+        self._run_checklist_btn.setEnabled(True)
+        text = report.format_text() if hasattr(report, "format_text") else str(report)
+        self._product_log.setPlainText(text)
+        overall = getattr(report, "overall", "?")
+        self._product_status.setText(f"Checklist finished — overall {overall}.")
+
+    def _on_checklist_failed(self, message: str) -> None:
+        self._run_checklist_btn.setEnabled(True)
+        self._product_status.setText(message)
+        self._product_log.appendPlainText(message)
+        QMessageBox.critical(self, "Checklist failed", message)
+
+    def _append_lab_log(self, text: str) -> None:
         self._log.moveCursor(self._log.textCursor().MoveOperation.End)
         self._log.insertPlainText(text)
         self._log.moveCursor(self._log.textCursor().MoveOperation.End)
 
-    def _on_started(self, command: str) -> None:
+    def _on_lab_started(self, command: str) -> None:
         self._run_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._status.setText("Running…")
-        self._append_log(f"\n$ {command}\n")
+        self._append_lab_log(f"\n$ {command}\n")
 
-    def _on_finished(self, code: int) -> None:
+    def _on_lab_finished(self, code: int) -> None:
         self._run_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._status.setText(f"Finished with exit code {code}.")
-        self._append_log(f"\n[exit {code}]\n")
+        self._append_lab_log(f"\n[exit {code}]\n")
 
     def _open_results(self) -> None:
         letter = "abcdef"[self._tabs.currentIndex()]

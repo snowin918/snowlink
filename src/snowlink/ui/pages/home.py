@@ -21,15 +21,15 @@ class HomePage(QWidget):
 
         subtitle = QLabel(
             "Private LAN screen and system-audio share for Windows 11.\n"
-            "Phase 2: Share / View with screen + system audio (pairing in Phase 3)."
+            "Phase 3: Share / View with WebSocket pairing + system audio."
         )
         subtitle.setObjectName("brandSubtitle")
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
         warn = QLabel(
-            "Share/View works without pairing codes yet — use only on a trusted "
-            "private LAN. Keep viewer playback gain low. Diagnostics still runs "
+            "Enter the sharer's pairing code on the viewer, then Approve on the "
+            "sharer. Keep viewer playback gain low. Diagnostics still runs "
             "Phase 0 Experiments A–F."
         )
         warn.setObjectName("warningBanner")
@@ -49,7 +49,8 @@ class HomePage(QWidget):
             btn.clicked.connect(lambda _c=False, k=key: self.navigate.emit(k))
             layout.addWidget(btn)
 
-        settings = QPushButton("Settings (coming later)")
-        settings.setEnabled(False)
+        settings = QPushButton("Settings")
+        settings.setMinimumHeight(44)
+        settings.clicked.connect(lambda: self.navigate.emit("settings"))
         layout.addWidget(settings)
         layout.addStretch(1)

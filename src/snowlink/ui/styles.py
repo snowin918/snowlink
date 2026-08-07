@@ -37,6 +37,26 @@ QLabel#warningBanner {
     border: 1px solid #6a5530;
     border-radius: 4px;
 }
+QLabel#pairingCode {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: 4px;
+    color: #7fd4ce;
+}
+QLabel#sharingIndicator {
+    background-color: #4a1f1f;
+    color: #ffb4b4;
+    padding: 8px 10px;
+    border: 1px solid #7a3030;
+    border-radius: 4px;
+    font-weight: 600;
+}
+QLabel#statsPanel {
+    font-family: "Cascadia Mono", "Consolas", monospace;
+    font-size: 12px;
+    color: #c5d2de;
+    padding: 4px 2px;
+}
 QPushButton {
     background-color: #2b3848;
     color: #e8eef4;

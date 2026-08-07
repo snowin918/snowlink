@@ -67,9 +67,12 @@ async def test_screen_share_view_with_synthetic_audio() -> None:
         fps=15,
         preset="low",
         enable_audio=True,
+        auto_approve=True,
+        pairing_code="654321",
     )
     view_config = ScreenViewConfiguration(
         remote_ip="127.0.0.1",
+        pairing_code="654321",
         signaling_port=port,
         requested_source_ip="127.0.0.1",
         preview=False,

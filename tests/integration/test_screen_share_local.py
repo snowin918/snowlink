@@ -57,9 +57,12 @@ async def test_screen_share_view_local_loopback() -> None:
         fps=15,
         preset="low",
         enable_audio=False,
+        auto_approve=True,
+        pairing_code="123456",
     )
     view_config = ScreenViewConfiguration(
         remote_ip="127.0.0.1",
+        pairing_code="123456",
         signaling_port=port,
         requested_source_ip="127.0.0.1",
         preview=False,

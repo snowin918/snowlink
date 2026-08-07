@@ -3,7 +3,7 @@
 **Engineering Plan (MVP)**  
 **Platform:** Windows 11 (exactly two peers on the same physical LAN)  
 **Language:** Python 3.12+  
-**Status:** Plan only — no application implementation yet  
+**Status:** Implementation in progress — Phases 0–3 largely complete; Phase 4 reliability + ship packaging remaining  
 **Date:** 2026-08-06
 
 ---

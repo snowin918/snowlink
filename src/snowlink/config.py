@@ -27,10 +27,12 @@ class UserPreferences:
     last_remote_ip: str | None = None
     last_source_ip: str | None = None
     share_monitor: int = 0
+    audio_capture_device: str = "default"
+    auto_start_share: bool = True
     window_x: int | None = None
     window_y: int | None = None
-    window_width: int = 1040
-    window_height: int = 720
+    window_width: int = 700
+    window_height: int = 500
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

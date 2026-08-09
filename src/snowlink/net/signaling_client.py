@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +22,18 @@ from snowlink.net.protocol import SignalingState
 from snowlink.rtc.errors import WebRTCError, failure_for
 
 logger = logging.getLogger(__name__)
+
+
+def signaling_backoff_s(
+    attempt: int,
+    *,
+    initial_s: float = 0.5,
+    maximum_s: float = 8.0,
+) -> float:
+    """Exponential backoff for attempt index starting at 1."""
+    if attempt < 1:
+        attempt = 1
+    return float(min(maximum_s, initial_s * (2 ** (attempt - 1))))
 
 
 @dataclass
@@ -41,6 +55,18 @@ class WsSignalingClient:
     @property
     def state(self) -> SignalingState:
         return self._state
+
+    @property
+    def is_connected(self) -> bool:
+        """True when the underlying WebSocket appears open."""
+        ws = self._ws
+        if ws is None:
+            return False
+        try:
+            closed = getattr(ws, "closed", False)
+            return not bool(closed)
+        except Exception:
+            return False
 
     def _ws_url(self) -> str:
         return f"ws://{self.remote_ip}:{self.port}/ws"
@@ -137,6 +163,118 @@ class WsSignalingClient:
         secret = result.payload.get("session_secret")
         self.session_secret = str(secret) if secret else None
         self._state = SignalingState.AUTHENTICATED
+
+    async def connect_and_pair_with_retry(
+        self,
+        *,
+        max_attempts: int = 5,
+        initial_backoff_s: float = 0.5,
+        max_backoff_s: float = 8.0,
+        stop_event: asyncio.Event | None = None,
+        on_attempt: Callable[[int, BaseException | None], None] | None = None,
+    ) -> None:
+        """Dial + pair with exponential backoff on transient connection failures.
+
+        Pairing rejections / protocol errors are not retried.
+        """
+        last_error: BaseException | None = None
+        attempts = max(1, int(max_attempts))
+        for attempt in range(1, attempts + 1):
+            if stop_event is not None and stop_event.is_set():
+                raise WebRTCError(
+                    failure_for(
+                        "SIGNALING_CONNECTION_FAILED",
+                        "Signaling connect cancelled before pairing completed.",
+                    )
+                )
+            try:
+                if on_attempt is not None:
+                    on_attempt(attempt, None)
+                await self.connect_and_pair()
+                return
+            except WebRTCError as exc:
+                last_error = exc
+                code = getattr(getattr(exc, "failure", None), "code", "") or ""
+                # Auth / protocol outcomes should not spin retries.
+                if code in {
+                    "PAIRING_REJECTED",
+                    "PAIRING_EXPIRED",
+                    "PAIRING_RATE_LIMITED",
+                    "PROTOCOL_MISMATCH",
+                    "VIEWER_SLOT_TAKEN",
+                    "UNEXPECTED_WEBRTC_ERROR",
+                }:
+                    raise
+                if attempt >= attempts:
+                    raise
+                if on_attempt is not None:
+                    on_attempt(attempt, exc)
+                delay = signaling_backoff_s(
+                    attempt,
+                    initial_s=initial_backoff_s,
+                    maximum_s=max_backoff_s,
+                )
+                logger.info(
+                    "Signaling connect attempt %s/%s failed (%s); retry in %.1fs",
+                    attempt,
+                    attempts,
+                    code or type(exc).__name__,
+                    delay,
+                )
+                await self.close()
+                try:
+                    if stop_event is None:
+                        await asyncio.sleep(delay)
+                    else:
+                        await asyncio.wait_for(stop_event.wait(), timeout=delay)
+                        raise WebRTCError(
+                            failure_for(
+                                "SIGNALING_CONNECTION_FAILED",
+                                "Signaling connect cancelled during retry backoff.",
+                            )
+                        )
+                except TimeoutError:
+                    continue
+            except Exception as exc:
+                last_error = exc
+                if attempt >= attempts:
+                    raise WebRTCError(
+                        failure_for(
+                            "SIGNALING_CONNECTION_FAILED",
+                            f"Could not connect to signaling after {attempts} attempts.",
+                            exception=exc,
+                        )
+                    ) from exc
+                if on_attempt is not None:
+                    on_attempt(attempt, exc)
+                delay = signaling_backoff_s(
+                    attempt,
+                    initial_s=initial_backoff_s,
+                    maximum_s=max_backoff_s,
+                )
+                await self.close()
+                try:
+                    if stop_event is None:
+                        await asyncio.sleep(delay)
+                    else:
+                        await asyncio.wait_for(stop_event.wait(), timeout=delay)
+                        raise WebRTCError(
+                            failure_for(
+                                "SIGNALING_CONNECTION_FAILED",
+                                "Signaling connect cancelled during retry backoff.",
+                            )
+                        )
+                except TimeoutError:
+                    continue
+        if isinstance(last_error, WebRTCError):
+            raise last_error
+        raise WebRTCError(
+            failure_for(
+                "SIGNALING_CONNECTION_FAILED",
+                f"Could not connect to signaling after {attempts} attempts.",
+                exception=last_error,
+            )
+        )
 
     async def wait_offer(self) -> dict[str, str]:
         envelope = await self._recv_typed(expected="offer")

@@ -2,15 +2,28 @@
 
 Private LAN screen and system-audio share for Windows 11 (exactly two peers).
 
-**Phase 3 demo:** Share / View over LAN with **screen + system audio**,
-**WebSocket signaling**, and **6-digit pairing + on-sharer approval**. Phase 0
-gate is `GO` with constraints — see `docs/phase-0-go-no-go.md` (default capture
-preset is **Low** because Balanced may miss ~30 FPS on software capture).
+**MVP product:** Share / View over LAN with **screen + system audio**,
+**WebSocket signaling**, **6-digit pairing + on-sharer approval**, diagnostics,
+stats (incl. CPU/RSS), and portable PyInstaller onedir. Phase 0 gate is `GO`
+with constraints — see `docs/phase-0-go-no-go.md` (default capture preset is
+**Low** because Balanced may miss ~30 FPS on software capture). Ship evidence:
+`docs/runbooks/mvp-ship-evidence.md`.
+
+## Portable app (no Python)
+
+1. Build (or unzip) the onedir folder — see [Build the GUI app](#build-the-gui-app-windowed).
+2. Copy the entire `Snowlink\` folder to the other PC (not only `Snowlink.exe`).
+3. Run `Snowlink.exe` (no Administrator required for normal use).
+4. **Share PC:** Home → Share This Computer → pick ★ LAN adapter + Bind IPv4 → Start Sharing → note the 6-digit code.
+5. **View PC:** Home → View Another Computer → enter IP, port `3847`, and code → Connect → Approve on the sharer.
+6. Stop Sharing / Disconnect when finished.
+
+Config and logs: `%LOCALAPPDATA%\Snowlink\`. Mid-session monitor or audio changes: Stop Sharing, re-select, Start Sharing again. Ship checklist: `docs/runbooks/ship-checklist.md`.
 
 ## Requirements
 
 - Windows 11 (target platform)
-- Python 3.12 or newer
+- Python 3.12 or newer (dev / editable installs only; portable exe does not need Python)
 
 ## Dependency policy
 
@@ -63,32 +76,39 @@ Or use the console script after editable install: `snowlink`.
 
 **Works now**
 
-- Home / Share / View / Diagnostics / Settings navigation
-- **Share:** Start Sharing / Stop (DXcam → VP8 + WASAPI loopback → Opus on selected LAN IP)
+- Home / Share / View / Diagnostics / Settings navigation (Home focuses on Share + View)
+- **Share (simple):** shows this PC’s address, screen picker, audio toggle, pairing code; Start / Stop; Approve when a viewer waits
+- **Share (Advanced):** adapter, bind IP, quality, capture backend, port, local preview
 - **Pairing:** 6-digit code on sharer; viewer enters code; sharer Approve / Deny
-- **View:** Connect / Disconnect (remote screen + system audio; Mute; Fullscreen)
-- **Stats panel** on Share/View (FPS, resolution, bitrate, RTT, loss, drops, underruns, A/V skew)
+- **View (simple):** other PC’s address + pairing code; Connect / Disconnect; Mute; Fullscreen
+- **View (Advanced):** port, source IP, playback device
+- **Connection details** panel (collapsed by default; compact or full metrics)
 - **Settings** persisted under `%LOCALAPPDATA%\Snowlink\config.toml`
-- **Diagnostics:** product connectivity checklist (§6.5) + Lab Phase 0 Experiments A–F
-- Share: local Experiment C preview still available
+- **Diagnostics:** connectivity checklist by default; Lab Phase 0 A–F behind “Show lab tools”
 - Structured logging with secret redaction under `%LOCALAPPDATA%\Snowlink\logs\`
+- Ordered app shutdown via `ShutdownCoordinator` (stop sessions → persist prefs → flush logs)
+- Quality presets: Lower quality / Balanced / **Higher quality (experimental)** — software VP8 at 1080p30 is CPU-heavy
 
 **Reliability / packaging**
 
-- Brief ICE disconnect recovery (`reconnecting`) on Share/View
-- Capture / selected-IP change surfaced with actionable errors
-- Portable PyInstaller onedir — see `docs/runbooks/ship-checklist.md`
-- Soak / acceptance: `docs/runbooks/mvp-acceptance.md`
+- ICE disconnect recovery (`reconnecting`) on Share/View
+- Viewer signaling connect retries with exponential backoff
+- Bind-IP disappearance fails share with VPN/LAN guidance (`docs/vpn-lan-access.md`)
+- Audio / monitor loss: actionable stop — re-select device and Start Sharing again
+- Portable PyInstaller onedir — `docs/runbooks/ship-checklist.md`
+- Soak sampler: `python scripts/dev/soak_sample.py --pid <PID> …`
+- Acceptance / evidence: `docs/runbooks/mvp-acceptance.md`, `docs/runbooks/mvp-ship-evidence.md`
+
 ### Two-PC GUI checklist (vpn-on-on)
 
 1. Enable VPN on both PCs; enable Allow LAN / split-tunnel if needed (`docs/vpn-lan-access.md`).
-2. On each PC: `pip install -e ".[ui,capture,audio,webrtc]"` then `python -m snowlink`.
-3. Share: pick physical LAN adapter + monitor + loopback device + preset (default **low**) → Start Sharing → note **pairing code**.
+2. On each PC: run portable `Snowlink.exe`, or `pip install -e ".[ui,capture,audio,webrtc]"` then `python -m snowlink`.
+3. Share: pick ★ physical LAN adapter + Bind IPv4 + monitor + loopback + preset (default **low**) → Start Sharing → note **pairing code**.
 4. View: enter sharer LAN IP + port (default 3847) + pairing code → Connect.
 5. Sharer: **Approve** the viewer → confirm remote screen + audio (keep gain low).
 6. Stop Sharing / Disconnect on both sides.
 
-## Phase 3 CLI (no GUI)
+## Share / View CLI (no GUI)
 
 ```powershell
 # Sharer (bind to physical LAN IPv4; --auto-approve for lab/tests only)
@@ -120,6 +140,7 @@ packaging/dist/Snowlink/Snowlink.exe
 ```
 
 Distribute the **entire** `Snowlink\` folder (onedir layout), not only the `.exe`.
+Optional zip: `packaging/dist/Snowlink-MVP-portable.zip`.
 
 ## Build Phase 0 console exe (A + B only)
 
@@ -158,6 +179,7 @@ docs/runbooks/    Operational runbooks (incl. Phase 0 evidence)
 scripts/          Dev, packaging, and firewall helpers
 packaging/        PyInstaller / installer artifacts
 config/           Default non-secret configuration
+LICENSE           Proprietary license text
 ```
 
 See `PLAN.md` for the full engineering plan. Phase 0 Experiments A–F live under

@@ -72,7 +72,7 @@ Terminal A:
 
   python experiments/experiment_e_webrtc_video.py send `
     --bind-ip 127.0.0.1 `
-    --port 3848 `
+    --port 3847 `
     --fps 30 `
     --width 1280 `
     --height 720 `
@@ -82,7 +82,7 @@ Terminal B:
 
   python experiments/experiment_e_webrtc_video.py receive `
     --remote-ip 127.0.0.1 `
-    --port 3848 `
+    --port 3847 `
     --source-ip 127.0.0.1 `
     --duration 30
 
@@ -92,7 +92,7 @@ Computer A:
 
   python experiments/experiment_e_webrtc_video.py send `
     --bind-ip <COMPUTER_A_LAN_IP> `
-    --port 3848 `
+    --port 3847 `
     --fps 30 `
     --width 1280 `
     --height 720 `
@@ -103,7 +103,7 @@ Computer B:
 
   python experiments/experiment_e_webrtc_video.py receive `
     --remote-ip <COMPUTER_A_LAN_IP> `
-    --port 3848 `
+    --port 3847 `
     --source-ip <COMPUTER_B_LAN_IP> `
     --duration 120 `
     --session-name vpn-on-on
@@ -112,7 +112,7 @@ Computer B:
 -----------------------------------------
   python experiments/experiment_e_webrtc_video.py receive `
     --remote-ip <COMPUTER_A_LAN_IP> `
-    --port 3848 `
+    --port 3847 `
     --source-ip <COMPUTER_B_LAN_IP> `
     --duration 600 `
     --no-preview `

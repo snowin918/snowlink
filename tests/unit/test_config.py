@@ -37,6 +37,10 @@ def test_missing_config_returns_defaults(tmp_path: Path) -> None:
     assert loaded.signaling_port == 3847
     assert loaded.preset == "low"
     assert loaded.enable_audio is True
+    assert loaded.auto_start_share is True
+    assert loaded.audio_capture_device == "default"
+    assert loaded.window_width == 700
+    assert loaded.window_height == 500
 
 
 def test_corrupt_config_returns_defaults(tmp_path: Path) -> None:

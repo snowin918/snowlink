@@ -1,14 +1,12 @@
-"""View page — connect to a remote screen share (+ system audio + pairing)."""
+"""View page — connect to a remote screen share (video opens in a session window)."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import Signal
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -16,17 +14,33 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from snowlink.media.audio_track import AudioPlaybackControls
+from snowlink.ui.widgets.collapsible import wrap_in_scroll
 from snowlink.ui.widgets.stats_panel import StatsPanel
 from snowlink.ui.workers import AsyncioSessionWorker
 
+_PHASE_STATUS: dict[str, str] = {
+    "idle": "Ready.",
+    "connecting": "Connecting…",
+    "pairing": "Checking pairing code…",
+    "negotiating": "Connecting…",
+    "viewing": "Connected — video opens in a separate window.",
+    "reconnecting": "Reconnecting…",
+    "stopping": "Disconnecting…",
+    "failed": "Connection failed.",
+}
+
 
 class ViewPage(QWidget):
+    session_state_changed = Signal(object)
+    frame_ready = Signal(object)  # QImage
+    session_finished = Signal()
+    session_failed = Signal(str)
+
     def __init__(self, preferences: Any | None = None) -> None:
         super().__init__()
         self._preferences = preferences
@@ -37,49 +51,29 @@ class ViewPage(QWidget):
         self._session.finished.connect(self._on_session_finished)
         self._session.failed.connect(self._on_session_failed)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 28, 28, 28)
-        layout.setSpacing(12)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(6)
 
         title = QLabel("View Another Computer")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
 
-        warn = QLabel(
-            "Enter the sharer's LAN IP, port, and 6-digit pairing code. Use "
-            "default/WASAPI speakers or headphones. Unmute; keep Windows volume up."
+        tip = QLabel(
+            "Enter the other PC’s address and the 6-digit pairing code. "
+            "After they Accept, the remote screen opens in a separate window. "
+            "Port and source IP are under Settings."
         )
-        warn.setObjectName("warningBanner")
-        warn.setWordWrap(True)
-        layout.addWidget(warn)
+        tip.setObjectName("warningBanner")
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
 
         box = QGroupBox("Connection")
         form = QFormLayout(box)
         self._ip = QLineEdit()
-        self._ip.setPlaceholderText("192.168.1.25")
-        form.addRow("Remote IP", self._ip)
-
-        self._port = QSpinBox()
-        self._port.setRange(1, 65535)
-        self._port.setValue(3847)
-        form.addRow("Port", self._port)
-
-        self._source_ip = QLineEdit()
-        self._source_ip.setPlaceholderText("optional local LAN IPv4")
-        form.addRow("Source IP", self._source_ip)
-
-        self._playback_device = QComboBox()
-        self._playback_device.setMinimumWidth(280)
-        form.addRow("Playback device", self._playback_device)
-
-        self._enable_audio = QCheckBox("Play remote system audio")
-        self._enable_audio.setChecked(True)
-        form.addRow("", self._enable_audio)
-
-        self._mute = QCheckBox("Mute")
-        self._mute.setChecked(False)
-        self._mute.toggled.connect(self._on_mute_toggled)
-        form.addRow("", self._mute)
+        self._ip.setPlaceholderText("e.g. 192.168.1.25")
+        form.addRow("Other PC’s address", self._ip)
 
         self._code = QLineEdit()
         self._code.setPlaceholderText("6-digit pairing code")
@@ -97,33 +91,19 @@ class ViewPage(QWidget):
         self._disconnect_btn.setEnabled(False)
         self._disconnect_btn.clicked.connect(self._session.stop)
         row.addWidget(self._disconnect_btn)
-
-        self._fullscreen_btn = QPushButton("Fullscreen")
-        self._fullscreen_btn.setEnabled(False)
-        self._fullscreen_btn.clicked.connect(self._toggle_fullscreen)
-        row.addWidget(self._fullscreen_btn)
         row.addStretch(1)
         layout.addLayout(row)
-
-        self._video = QLabel("No video yet.")
-        self._video.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._video.setMinimumHeight(280)
-        self._video.setStyleSheet("background:#0f172a; color:#94a3b8; border-radius:8px;")
-        layout.addWidget(self._video, stretch=1)
-
-        self._fullscreen_window: QWidget | None = None
-        self._fullscreen_label: QLabel | None = None
-        self._last_pixmap: QPixmap | None = None
 
         self._status = QLabel("Ready.")
         self._status.setObjectName("hint")
         self._status.setWordWrap(True)
         layout.addWidget(self._status)
 
-        self._stats = StatsPanel()
+        self._stats = StatsPanel(collapsed=True)
         layout.addWidget(self._stats)
+        layout.addStretch(1)
 
-        self._refresh_playback_devices()
+        wrap_in_scroll(self, content)
         self.apply_preferences(self._preferences)
 
     def apply_preferences(self, prefs: Any | None) -> None:
@@ -131,73 +111,20 @@ class ViewPage(QWidget):
         if prefs is None:
             return
         try:
-            self._port.setValue(int(getattr(prefs, "signaling_port", 3847)))
             remote = getattr(prefs, "last_remote_ip", None)
             if remote:
                 self._ip.setText(str(remote))
-            source = getattr(prefs, "last_source_ip", None)
-            if source:
-                self._source_ip.setText(str(source))
-            self._enable_audio.setChecked(bool(getattr(prefs, "enable_audio", True)))
         except Exception:
             pass
 
-    def _refresh_playback_devices(self) -> None:
-        self._playback_device.clear()
-        self._playback_device.addItem("default (WASAPI output)", "default")
-        try:
-            from snowlink.platform_win.audio_endpoints import enumerate_audio_endpoints
+    def set_muted(self, muted: bool) -> None:
+        self._audio_controls.muted = bool(muted)
 
-            for ep in enumerate_audio_endpoints():
-                if not getattr(ep, "can_playback", False):
-                    continue
-                if getattr(ep, "is_loopback", False):
-                    continue
-                # Prefer WASAPI — MME/DirectSound duplicates confuse selection
-                # and often produce silent or wrong-device output.
-                if not getattr(ep, "is_wasapi", False):
-                    continue
-                flags = []
-                if getattr(ep, "is_default_output", False):
-                    flags.append("DEFAULT")
-                flag_s = f" [{', '.join(flags)}]" if flags else ""
-                label = f"{ep.index}: {ep.name} (WASAPI){flag_s}"
-                self._playback_device.addItem(label, str(ep.index))
-        except Exception:
-            pass
+    def disconnect_session(self) -> None:
+        self._session.stop()
 
-    def _on_mute_toggled(self, checked: bool) -> None:
-        self._audio_controls.muted = bool(checked)
-
-    def _toggle_fullscreen(self) -> None:
-        if self._fullscreen_window is not None and self._fullscreen_window.isVisible():
-            self._fullscreen_window.close()
-            self._fullscreen_window = None
-            self._fullscreen_label = None
-            self._fullscreen_btn.setText("Fullscreen")
-            return
-        win = QWidget()
-        win.setWindowTitle("Snowlink — Fullscreen")
-        win.setStyleSheet("background:#000;")
-        lay = QVBoxLayout(win)
-        lay.setContentsMargins(0, 0, 0, 0)
-        label = QLabel()
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(label)
-        if self._last_pixmap is not None:
-            label.setPixmap(
-                self._last_pixmap.scaled(
-                    win.screen().availableGeometry().size()
-                    if win.screen() is not None
-                    else self._video.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
-        win.showFullScreen()
-        self._fullscreen_window = win
-        self._fullscreen_label = label
-        self._fullscreen_btn.setText("Exit fullscreen")
+    def mark_frame_consumed(self) -> None:
+        self._session.mark_frame_consumed()
 
     def _connect(self) -> None:
         if self._session.is_running:
@@ -205,17 +132,22 @@ class ViewPage(QWidget):
             return
         remote_ip = self._ip.text().strip()
         if not remote_ip:
-            QMessageBox.warning(self, "Missing IP", "Enter the sharer's LAN IPv4 address.")
+            QMessageBox.warning(
+                self, "Missing address", "Enter the other PC’s address."
+            )
             return
         code = self._code.text().strip()
         if not code.isdigit() or len(code) != 6:
             QMessageBox.warning(self, "Pairing code", "Enter the 6-digit pairing code.")
             return
-        port = int(self._port.value())
-        source = self._source_ip.text().strip() or None
-        enable_audio = self._enable_audio.isChecked()
-        playback_device = self._playback_device.currentData() or "default"
-        self._audio_controls.muted = self._mute.isChecked()
+        prefs = self._preferences
+        port = int(getattr(prefs, "signaling_port", 3847) if prefs else 3847)
+        source = getattr(prefs, "last_source_ip", None) if prefs else None
+        if isinstance(source, str):
+            source = source.strip() or None
+        enable_audio = bool(getattr(prefs, "enable_audio", True) if prefs else True)
+        playback_device = "default"
+        self._audio_controls.muted = False
         controls = self._audio_controls
 
         def factory(stop_event: Any, on_state: Any, on_frame: Any) -> Any:
@@ -248,74 +180,41 @@ class ViewPage(QWidget):
             self._session.start(factory)
             self._connect_btn.setEnabled(False)
             self._disconnect_btn.setEnabled(True)
-            self._fullscreen_btn.setEnabled(True)
-            self._status.setText(f"Connecting to {remote_ip}:{port}…")
+            self._status.setText("Connecting…")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Connect failed", str(exc))
 
+    def _friendly_status(self, state: Any) -> str:
+        phase = str(getattr(state, "phase", "") or "")
+        detail = str(getattr(state, "detail", "") or "").strip()
+        mapped = _PHASE_STATUS.get(phase)
+        if mapped:
+            if phase == "viewing" and getattr(state, "muted", False):
+                return "Connected (muted)."
+            return mapped
+        if detail:
+            return detail
+        return phase or "Ready."
+
     def _on_session_state(self, state: Any) -> None:
-        detail = getattr(state, "detail", "") or getattr(state, "phase", "")
-        frames = getattr(state, "frames", 0)
-        audio_frames = getattr(state, "audio_frames", 0)
-        underruns = getattr(state, "audio_underruns", 0)
-        muted = getattr(state, "muted", False)
-        phase = getattr(state, "phase", "")
-        mute_s = "muted" if muted else "audio"
-        peak = None
-        stats = getattr(state, "stats", None)
-        if stats is not None:
-            peak = getattr(stats, "audio_peak", None)
-        peak_s = f", level={min(100.0, float(peak) * 100.0):.0f}%" if peak is not None else ""
-        self._status.setText(
-            f"[{phase}] {detail} (video={frames}, audio={audio_frames}, "
-            f"underruns={underruns}{peak_s}, {mute_s})"
-        )
+        self._status.setText(self._friendly_status(state))
         self._stats.update_from_state(state)
+        self.session_state_changed.emit(state)
 
     def _on_frame(self, image: QImage) -> None:
-        try:
-            if image.isNull():
-                return
-            pixmap = QPixmap.fromImage(image)
-            self._last_pixmap = pixmap
-            scaled = pixmap.scaled(
-                self._video.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation,
-            )
-            self._video.setPixmap(scaled)
-            if self._fullscreen_label is not None and self._fullscreen_window is not None:
-                self._fullscreen_label.setPixmap(
-                    pixmap.scaled(
-                        self._fullscreen_window.size(),
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.FastTransformation,
-                    )
-                )
-        finally:
-            self._session.mark_frame_consumed()
+        self.frame_ready.emit(image)
 
     def _on_session_finished(self, _state: Any) -> None:
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
-        self._fullscreen_btn.setEnabled(False)
-        self._fullscreen_btn.setText("Fullscreen")
-        if self._fullscreen_window is not None:
-            self._fullscreen_window.close()
-            self._fullscreen_window = None
-            self._fullscreen_label = None
         self._stats.clear()
         self._status.setText("Disconnected.")
+        self.session_finished.emit()
 
     def _on_session_failed(self, message: str) -> None:
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
-        self._fullscreen_btn.setEnabled(False)
-        self._fullscreen_btn.setText("Fullscreen")
-        if self._fullscreen_window is not None:
-            self._fullscreen_window.close()
-            self._fullscreen_window = None
-            self._fullscreen_label = None
         self._stats.clear()
         self._status.setText(message)
+        self.session_failed.emit(message)
         QMessageBox.critical(self, "View failed", message)

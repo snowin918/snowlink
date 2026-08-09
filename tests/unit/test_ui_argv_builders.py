@@ -7,12 +7,15 @@ from pathlib import Path
 import pytest
 
 from snowlink.ui.argv_builders import (
+    PRESET_LABELS,
     build_experiment_a_argv,
     build_experiment_b_argv,
     build_experiment_c_argv,
     build_experiment_d_argv,
     build_experiment_e_argv,
     build_experiment_f_argv,
+    populate_preset_combo,
+    preset_from_combo,
 )
 
 
@@ -128,3 +131,56 @@ def test_experiment_process_argv_dev_mode(tmp_path: Path) -> None:
     assert args[0] == str(script)
     assert args[1:] == ["list", "--json"]
     assert program  # sys.executable
+
+
+def test_preset_labels_mark_high_experimental() -> None:
+    assert PRESET_LABELS["high"] == "Higher quality (experimental)"
+    assert PRESET_LABELS["low"] == "Lower quality"
+    assert PRESET_LABELS["balanced"] == "Balanced"
+
+
+def test_populate_and_read_preset_combo() -> None:
+    class FakeCombo:
+        def __init__(self) -> None:
+            self.items: list[tuple[str, str]] = []
+            self._index = -1
+
+        def clear(self) -> None:
+            self.items.clear()
+            self._index = -1
+
+        def addItem(self, text: str, data: object = None) -> None:  # noqa: N802
+            self.items.append((text, str(data)))
+
+        def findData(self, data: object) -> int:  # noqa: N802
+            needle = str(data)
+            for i, (_t, d) in enumerate(self.items):
+                if d == needle:
+                    return i
+            return -1
+
+        def setCurrentIndex(self, index: int) -> None:  # noqa: N802
+            self._index = index
+
+        def currentData(self) -> str | None:  # noqa: N802
+            if 0 <= self._index < len(self.items):
+                return self.items[self._index][1]
+            return None
+
+        def currentText(self) -> str:  # noqa: N802
+            if 0 <= self._index < len(self.items):
+                return self.items[self._index][0]
+            return ""
+
+    combo = FakeCombo()
+    populate_preset_combo(combo, current="high")
+    assert preset_from_combo(combo) == "high"
+    assert combo.currentText() == "Higher quality (experimental)"
+    populate_preset_combo(combo, current="balanced")
+    assert preset_from_combo(combo) == "balanced"
+
+
+def test_experiment_e_default_port_is_product_port() -> None:
+    args = build_experiment_e_argv("send", bind_ip="192.168.1.25")
+    assert "--port" in args
+    assert args[args.index("--port") + 1] == "3847"

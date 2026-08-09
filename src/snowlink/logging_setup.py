@@ -83,3 +83,40 @@ def setup_logging(
 
     logging.getLogger(__name__).debug("Logging initialized at %s", log_file)
     return directory
+
+
+def log_file_path(*, log_dir: Path | None = None) -> Path:
+    """Return the primary rotating log file path."""
+    directory = log_dir or logs_dir()
+    return directory / "snowlink.log"
+
+
+def read_recent_log_lines(
+    max_lines: int = 80,
+    *,
+    log_dir: Path | None = None,
+) -> list[str]:
+    """Return the last *max_lines* from the sanitized application log.
+
+    Lines are already redacted by :class:`SecretRedactionFilter` when written.
+    Returns an empty list when the log file is missing or unreadable.
+    """
+    path = log_file_path(log_dir=log_dir)
+    if not path.is_file():
+        return []
+    try:
+        # Read a bounded tail without loading multi-MB logs into memory.
+        max_bytes = max(16_384, max_lines * 512)
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes), 0)
+            raw = handle.read().decode("utf-8", errors="replace")
+        lines = raw.splitlines()
+        if size > max_bytes and lines:
+            # Drop the first partial line from a mid-file seek.
+            lines = lines[1:]
+        return lines[-max(1, max_lines) :]
+    except Exception:
+        logging.getLogger(__name__).debug("Failed to read log tail", exc_info=True)
+        return []

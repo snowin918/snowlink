@@ -21,7 +21,10 @@ EXPERIMENTS = ROOT / "experiments"
 ENTRY = SPECDIR / "snowlink_gui_entry.py"
 
 # PySide6 (and optional media stacks if installed in the build venv)
-datas: list = [(str(EXPERIMENTS), "experiments")]
+datas: list = [
+    (str(EXPERIMENTS), "experiments"),
+    (str(ROOT / "logo"), "logo"),
+]
 binaries: list = []
 hiddenimports: list = [
     "snowlink",
@@ -32,11 +35,14 @@ hiddenimports: list = [
     "snowlink.ui.paths",
     "snowlink.ui.argv_builders",
     "snowlink.ui.styles",
+    "snowlink.ui.dialogs",
+    "snowlink.ui.windows",
+    "snowlink.ui.share_controller",
     "snowlink.ui.pages",
     "snowlink.ui.pages.home",
-    "snowlink.ui.pages.share",
     "snowlink.ui.pages.view",
-    "snowlink.ui.pages.diagnostics",
+    "snowlink.ui.pages.settings",
+    "snowlink.session_history",
     "experiment_a_adapter_bind",
     "experiment_b_two_machine_tcp",
     "experiment_c_screen_capture",
@@ -49,6 +55,7 @@ hiddenimports += collect_submodules("snowlink")
 # Include media/audio stacks when present in the build venv. PyAudioWPatch
 # must be collect_all'd — analysis alone may pull only _portaudiowpatch.pyd
 # and omit the importable ``pyaudiowpatch`` package (breaks system-audio share).
+# winrt-* packages are required for DXcam backend=winrt in the portable exe.
 for pkg in (
     "PySide6",
     "shiboken6",
@@ -58,6 +65,17 @@ for pkg in (
     "aiortc",
     "aiohttp",
     "pyaudiowpatch",
+    "winrt",
+    "winrt.runtime",
+    "winrt.system",
+    "winrt.windows.foundation",
+    "winrt.windows.foundation.collections",
+    "winrt.windows.graphics",
+    "winrt.windows.graphics.capture",
+    "winrt.windows.graphics.capture.interop",
+    "winrt.windows.graphics.directx",
+    "winrt.windows.graphics.directx.direct3d11",
+    "winrt.windows.graphics.directx.direct3d11.interop",
 ):
     try:
         pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
@@ -72,7 +90,27 @@ hiddenimports += [
     "pyaudiowpatch.__main__",
     "_portaudiowpatch",
     "numpy",
+    "winrt",
+    "winrt.runtime",
+    "winrt.system",
+    "winrt.windows.graphics.capture",
+    "winrt.windows.graphics.capture.interop",
+    "winrt.windows.graphics.directx",
+    "winrt.windows.graphics.directx.direct3d11",
+    "winrt.windows.graphics.directx.direct3d11.interop",
 ]
+# Namespace / binary winrt modules often need explicit submodule collection.
+for pkg in (
+    "winrt",
+    "winrt.windows",
+    "winrt.windows.graphics",
+    "winrt.windows.graphics.capture",
+    "winrt.windows.graphics.directx",
+):
+    try:
+        hiddenimports += collect_submodules(pkg)
+    except Exception:
+        pass
 
 a = Analysis(  # noqa: F821  # type: ignore[name-defined]
     [str(ENTRY)],
@@ -110,6 +148,7 @@ exe = EXE(  # noqa: F821  # type: ignore[name-defined]
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(ROOT / "logo" / "snowlink.ico"),
 )
 
 coll = COLLECT(  # noqa: F821  # type: ignore[name-defined]

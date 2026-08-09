@@ -615,7 +615,7 @@ python experiments/experiment_e_webrtc_video.py guide
 # Sender (Computer A) — bind signaling only to the physical LAN IPv4
 python experiments/experiment_e_webrtc_video.py send `
   --bind-ip 192.168.1.25 `
-  --port 3848 `
+  --port 3847 `
   --fps 30 `
   --width 1280 `
   --height 720 `
@@ -625,7 +625,7 @@ python experiments/experiment_e_webrtc_video.py send `
 # Receiver (Computer B)
 python experiments/experiment_e_webrtc_video.py receive `
   --remote-ip 192.168.1.25 `
-  --port 3848 `
+  --port 3847 `
   --source-ip 192.168.1.30 `
   --duration 120 `
   --session-name vpn-on-on
@@ -633,14 +633,14 @@ python experiments/experiment_e_webrtc_video.py receive `
 # Headless metrics / JSON
 python experiments/experiment_e_webrtc_video.py receive `
   --remote-ip 192.168.1.25 `
-  --port 3848 `
+  --port 3847 `
   --source-ip 192.168.1.30 `
   --duration 600 `
   --no-preview `
   --json
 ```
 
-Default port is **3848**. Preview closes on Escape. Ctrl+C and duration
+Default port is **3847**. Preview closes on Escape. Ctrl+C and duration
 completion shut down cleanly.
 
 ### Both-VPN test instructions

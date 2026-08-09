@@ -194,6 +194,19 @@ class AsyncioSessionWorker(QObject):
                 self.frame_ready.emit(image)
 
             final_state = loop.run_until_complete(factory(stop_event, on_state, on_frame))
+            # run_screen_share catches many errors and returns phase=failed instead
+            # of raising — surface that as ``failed`` so the UI can show a dialog.
+            if (
+                final_state is not None
+                and str(getattr(final_state, "phase", "") or "") == "failed"
+            ):
+                message = str(
+                    getattr(final_state, "error", None)
+                    or getattr(final_state, "detail", None)
+                    or "Session failed."
+                )
+                self.failed.emit(message)
+                final_state = None  # avoid duplicate handling in finished
         except Exception as exc:  # noqa: BLE001 — surface to UI
             self.failed.emit(str(exc))
         finally:

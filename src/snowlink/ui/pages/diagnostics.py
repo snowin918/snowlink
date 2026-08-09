@@ -78,29 +78,43 @@ class DiagnosticsPage(QWidget):
         self._checklist_thread: QThread | None = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(10)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(6)
 
         title = QLabel("Diagnostics")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
 
         hint = QLabel(
-            "Product checklist verifies LAN bind, signaling, ICE/media (when a session "
-            "is live), and firewall. Lab tabs run Phase 0 Experiments A–F."
+            "Checks whether this PC can listen on the selected address and talk to "
+            "the other PC. Use this if Share/View cannot connect."
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
+        self._show_lab = QCheckBox("Show lab tools")
+        self._show_lab.setChecked(False)
+        self._show_lab.toggled.connect(self._on_show_lab_toggled)
+        layout.addWidget(self._show_lab)
+
         self._outer = QTabWidget()
         self._outer.addTab(self._build_product_tab(), "Connectivity")
-        self._outer.addTab(self._build_lab_tabs(), "Lab (Phase 0)")
+        self._lab_widget = self._build_lab_tabs()
         layout.addWidget(self._outer, 1)
 
     def set_live_session_snapshot(self, snapshot: Any | None) -> None:
         """Optional Share/View snapshot for ICE / media checklist steps."""
         self._live_snapshot = snapshot
+
+    def _on_show_lab_toggled(self, checked: bool) -> None:
+        idx = self._outer.indexOf(self._lab_widget)
+        if checked:
+            if idx < 0:
+                self._outer.addTab(self._lab_widget, "Lab (Phase 0)")
+                self._outer.setCurrentWidget(self._lab_widget)
+        elif idx >= 0:
+            self._outer.removeTab(idx)
 
     def _build_product_tab(self) -> QWidget:
         w = QWidget()
@@ -133,6 +147,10 @@ class DiagnosticsPage(QWidget):
         self._run_checklist_btn.setObjectName("primaryButton")
         self._run_checklist_btn.clicked.connect(self._run_checklist)
         row.addWidget(self._run_checklist_btn)
+
+        refresh_logs = QPushButton("Refresh log tail")
+        refresh_logs.clicked.connect(self._refresh_log_tail)
+        row.addWidget(refresh_logs)
         row.addStretch(1)
         layout.addLayout(row)
 
@@ -141,11 +159,22 @@ class DiagnosticsPage(QWidget):
         self._product_log.setReadOnly(True)
         layout.addWidget(self._product_log, 1)
 
+        log_label = QLabel("Recent sanitized log entries")
+        log_label.setObjectName("hint")
+        layout.addWidget(log_label)
+
+        self._log_tail = QPlainTextEdit()
+        self._log_tail.setObjectName("logView")
+        self._log_tail.setReadOnly(True)
+        self._log_tail.setMaximumHeight(160)
+        layout.addWidget(self._log_tail)
+
         self._product_status = QLabel("Idle.")
         self._product_status.setObjectName("hint")
         layout.addWidget(self._product_status)
 
         self._refresh_adapters()
+        self._refresh_log_tail()
         return w
 
     def _build_lab_tabs(self) -> QWidget:
@@ -197,10 +226,20 @@ class DiagnosticsPage(QWidget):
     def _refresh_adapters(self) -> None:
         self._adapter.clear()
         try:
+            from snowlink.net.adapter_selection import annotate_adapters
             from snowlink.platform_win.adapters import enumerate_adapters, is_windows
 
             if is_windows():
-                for adapter in enumerate_adapters():
+                adapters = annotate_adapters(enumerate_adapters())
+                adapters = sorted(
+                    adapters,
+                    key=lambda a: (
+                        0 if a.preferred else 1,
+                        -int(a.preference_score),
+                        a.friendly_name.lower(),
+                    ),
+                )
+                for adapter in adapters:
                     ipv4s = (
                         ", ".join(a.address for a in adapter.ipv4_addresses)
                         or "(no IPv4)"
@@ -210,12 +249,47 @@ class DiagnosticsPage(QWidget):
                         if hasattr(adapter.category, "value")
                         else str(adapter.category)
                     )
-                    label = f"{adapter.friendly_name} [{cat}] - {ipv4s}"
+                    marker = "★ " if adapter.preferred else ""
+                    label = f"{marker}{adapter.friendly_name} [{cat}] - {ipv4s}"
                     self._adapter.addItem(label, adapter)
+                # Prefer physical LAN by default.
+                try:
+                    from snowlink.net.adapter_selection import select_preferred_endpoint
+
+                    selected = select_preferred_endpoint(adapters)
+                    if selected is not None:
+                        for i in range(self._adapter.count()):
+                            item = self._adapter.itemData(i)
+                            if (
+                                item is not None
+                                and getattr(item, "adapter_id", None)
+                                == selected.adapter.adapter_id
+                            ):
+                                self._adapter.setCurrentIndex(i)
+                                break
+                except Exception:
+                    pass
             else:
                 self._adapter.addItem("(adapter list requires Windows)", None)
         except Exception as exc:  # noqa: BLE001
             self._adapter.addItem(f"(adapter error: {exc})", None)
+
+    def _refresh_log_tail(self) -> None:
+        try:
+            from snowlink.logging_setup import log_file_path, read_recent_log_lines
+
+            lines = read_recent_log_lines(80)
+            if not lines:
+                path = log_file_path()
+                self._log_tail.setPlainText(f"(no log entries yet — {path})")
+            else:
+                self._log_tail.setPlainText("\n".join(lines))
+                # Keep latest lines visible.
+                cursor = self._log_tail.textCursor()
+                cursor.movePosition(cursor.MoveOperation.End)
+                self._log_tail.setTextCursor(cursor)
+        except Exception as exc:  # noqa: BLE001
+            self._log_tail.setPlainText(f"(log tail unavailable: {exc})")
 
     def _selected_bind_ip(self) -> str | None:
         adapter = self._adapter.currentData()
@@ -267,6 +341,7 @@ class DiagnosticsPage(QWidget):
         self._product_log.setPlainText(text)
         overall = getattr(report, "overall", "?")
         self._product_status.setText(f"Checklist finished — overall {overall}.")
+        self._refresh_log_tail()
 
     def _on_checklist_failed(self, message: str) -> None:
         self._run_checklist_btn.setEnabled(True)
@@ -471,7 +546,7 @@ class DiagnosticsPage(QWidget):
         form.addRow("Source IP (receive)", source_ip)
         port = QSpinBox()
         port.setRange(1, 65535)
-        port.setValue(3848)
+        port.setValue(3847)
         form.addRow("Port", port)
         duration = QDoubleSpinBox()
         duration.setRange(1.0, 3600.0)

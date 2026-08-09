@@ -103,3 +103,37 @@ def experiment_process_argv(script: Path, argv: list[str]) -> tuple[str, list[st
     if is_frozen():
         return program, ["--experiment", script.stem, *argv]
     return program, [str(script), *argv]
+
+
+def _logo_search_roots() -> list[Path]:
+    roots: list[Path] = []
+    if is_frozen():
+        exe_dir = Path(sys.executable).resolve().parent
+        meipass = Path(getattr(sys, "_MEIPASS", exe_dir))
+        roots.extend(
+            (
+                exe_dir / "logo",
+                meipass / "logo",
+                exe_dir / "_internal" / "logo",
+            )
+        )
+    roots.append(repo_root() / "logo")
+    return roots
+
+
+def logo_png() -> Path | None:
+    """Return path to ``snowlink.png`` when present."""
+    for root in _logo_search_roots():
+        path = root / "snowlink.png"
+        if path.is_file():
+            return path
+    return None
+
+
+def logo_ico() -> Path | None:
+    """Return path to ``snowlink.ico`` when present (falls back to PNG)."""
+    for root in _logo_search_roots():
+        path = root / "snowlink.ico"
+        if path.is_file():
+            return path
+    return logo_png()

@@ -3,8 +3,8 @@
 **Engineering Plan (MVP)**  
 **Platform:** Windows 11 (exactly two peers on the same physical LAN)  
 **Language:** Python 3.12+  
-**Status:** Implementation in progress — Phases 0–3 largely complete; Phase 4 reliability + ship packaging remaining  
-**Date:** 2026-08-06
+**Status:** MVP **shipped** (2026-08-09) — Phases 0–4 code, portable onedir, product polish, and full §17 acceptance complete (clean-VM / two-PC / firewall / VC++ / latency / soak evidence in `docs/runbooks/mvp-ship-evidence.md`)  
+**Date:** 2026-08-09
 
 ---
 

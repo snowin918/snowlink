@@ -367,7 +367,7 @@ async def run_screen_share(
             f"pairing code {pairing.code} ({media_note})"
         )
         _notify(on_state, state)
-        print(state.detail)
+        logger.info(state.detail)
 
         answer: dict[str, str] | None = None
         while not stop.is_set() and answer is None:
@@ -395,7 +395,7 @@ async def run_screen_share(
             f"{'screen+audio' if a_track is not None else 'screen'}"
         )
         _notify(on_state, state)
-        print(state.detail)
+        logger.info(state.detail)
 
         while not stop.is_set():
             if pc.connectionState == "failed":
@@ -444,19 +444,26 @@ async def run_screen_share(
             if audio_src is not None and audio_src.capture is not None:
                 audio_fatal = audio_src.capture.fatal_error
                 if audio_fatal is not None:
+                    fatal_code = getattr(audio_fatal, "code", "") or ""
+                    use_device_changed = fatal_code in {
+                        "DEVICE_DISCONNECTED",
+                        "AUDIO_DEVICE_CHANGED",
+                    }
                     raise WebRTCError(
                         failure_for(
-                            "CAPTURE_FAILED",
+                            "AUDIO_DEVICE_CHANGED"
+                            if use_device_changed
+                            else "CAPTURE_FAILED",
                             "System-audio loopback capture failed. "
                             "Stop sharing, re-select the loopback device matching "
-                            "your active Windows output, then restart.",
+                            "your active Windows output, then Start Sharing again.",
                             likely_cause=str(
                                 getattr(audio_fatal, "message", audio_fatal)
                             ),
                         )
                     )
 
-            # Selected LAN IP disappeared (VPN route / adapter change)
+            # Selected LAN IP disappeared (VPN route / adapter change) → fail
             if rtc_poll_counter % 8 == 0:
                 adapters_now = _load_adapters()
                 if adapters_now:
@@ -466,12 +473,25 @@ async def run_screen_share(
                             fromlist=["find_endpoint_by_ip"],
                         ).find_endpoint_by_ip
                         find_endpoint(adapters_now, config.bind_ip)
-                    except ValueError:
-                        state.detail = (
-                            f"Selected IP {config.bind_ip} is no longer assigned "
-                            "(VPN/route change?). See Diagnostics and docs/vpn-lan-access.md."
-                        )
-                        _notify(on_state, state)
+                    except ValueError as exc:
+                        raise WebRTCError(
+                            failure_for(
+                                "IP_NOT_ASSIGNED",
+                                f"Selected IP {config.bind_ip} is no longer assigned "
+                                "(VPN/route or adapter change). Stop sharing, re-select "
+                                "a physical LAN adapter, and see docs/vpn-lan-access.md.",
+                                exception=exc,
+                                likely_cause=(
+                                    "The bind address disappeared from local adapters "
+                                    "(common after VPN reconnect or NIC disable)."
+                                ),
+                                suggested_next_step=(
+                                    "Enable VPN Allow LAN / split-tunnel if needed, "
+                                    "refresh adapters on Share, pick the physical LAN "
+                                    "IPv4, then Start Sharing again."
+                                ),
+                            )
+                        ) from exc
 
             state.frames = track.frames_generated if track else 0
             if a_track is not None:
@@ -528,14 +548,14 @@ async def run_screen_share(
         state.error = format_failure_human(exc.failure)
         state.detail = state.error
         _notify(on_state, state)
-        print(state.error)
+        logger.info(state.error)
     except Exception as exc:
         failure = map_exception(exc)
         state.phase = "failed"
         state.error = format_failure_human(failure)
         state.detail = state.error
         _notify(on_state, state)
-        print(state.error)
+        logger.info(state.error)
     finally:
         stop.set()
         if track is not None:
@@ -630,9 +650,26 @@ async def run_screen_view(
             connect_timeout_s=config.timeouts.signaling_connect_s,
         )
         state.phase = "pairing"
-        state.detail = "Connected; completing pairing…"
+        state.detail = "Connecting; pairing with backoff on transient failures…"
         _notify(on_state, state)
-        await client.connect_and_pair()
+
+        def _on_signaling_attempt(attempt: int, err: BaseException | None) -> None:
+            if err is None and attempt > 1:
+                state.phase = "reconnecting"
+                state.detail = f"Retrying signaling connect (attempt {attempt})…"
+                _notify(on_state, state)
+            elif err is not None:
+                state.phase = "reconnecting"
+                state.detail = (
+                    f"Signaling attempt {attempt} failed; backing off before retry…"
+                )
+                _notify(on_state, state)
+
+        await client.connect_and_pair_with_retry(
+            max_attempts=5,
+            stop_event=stop,
+            on_attempt=_on_signaling_attempt,
+        )
 
         state.phase = "negotiating"
         state.detail = "Paired; waiting for sharer offer"
@@ -733,7 +770,7 @@ async def run_screen_view(
                         endpoint.name,
                         config.playback_device,
                     )
-                    print(
+                    logger.info(
                         f"Playback device: [{endpoint.index}] {endpoint.name} "
                         f"(selector={config.playback_device!r})"
                     )
@@ -773,7 +810,7 @@ async def run_screen_view(
         else:
             state.detail = "Receiving remote screen"
         _notify(on_state, state)
-        print(state.detail)
+        logger.info(state.detail)
 
         loop = asyncio.get_running_loop()
 
@@ -833,12 +870,26 @@ async def run_screen_view(
                     raise WebRTCError(
                         failure_for(
                             "ICE_CONNECTION_FAILED",
-                            "View session did not recover after disconnect (~10s).",
+                            "View session did not recover after disconnect (~10s). "
+                            "Disconnect, confirm the sharer is still sharing, then Connect again.",
                             ice_state=str(pc.iceConnectionState),
                         )
                     )
                 state.phase = "viewing"
                 state.detail = f"ICE recovered ({pc.iceConnectionState})"
+                _notify(on_state, state)
+
+            # Signaling WS drop after media is up: keep viewing on ICE; surface status.
+            if (
+                client is not None
+                and not client.is_connected
+                and state.phase == "viewing"
+                and pc.connectionState in {"connected", "completed"}
+            ):
+                state.detail = (
+                    "Signaling WebSocket closed; media still flowing over ICE. "
+                    "If video stalls, Disconnect and Connect again."
+                )
                 _notify(on_state, state)
 
             if audio_consumer is not None and audio_consumer.fatal_error is not None:
@@ -967,14 +1018,14 @@ async def run_screen_view(
         state.error = format_failure_human(exc.failure)
         state.detail = state.error
         _notify(on_state, state)
-        print(state.error)
+        logger.info(state.error)
     except Exception as exc:
         failure = map_exception(exc)
         state.phase = "failed"
         state.error = format_failure_human(failure)
         state.detail = state.error
         _notify(on_state, state)
-        print(state.error)
+        logger.info(state.error)
     finally:
         stop.set()
         if frame_task is not None:

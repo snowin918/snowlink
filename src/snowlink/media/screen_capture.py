@@ -49,8 +49,10 @@ from snowlink.platform_win.monitors import (
     probe_backend_availability,
 )
 
-# Isolated WinRT cursor compatibility (DXcam documents env-based control).
+# Isolated WinRT compatibility knobs (DXcam documents env-based control).
 _WINRT_CURSOR_ENV = "DXCAM_WINRT_CURSOR_CAPTURE"
+# Yellow capture border is a Windows WinRT indicator; prefer off for private LAN share.
+_WINRT_BORDER_ENV = "DXCAM_WINRT_BORDER_REQUIRED"
 
 
 @dataclass(slots=True)
@@ -139,8 +141,12 @@ def create_camera(
         raise CaptureError(cursor_failure)
 
     previous_cursor_env: str | None = None
+    previous_border_env: str | None = None
     if config.backend == "winrt":
         previous_cursor_env = _apply_winrt_cursor_env(enabled=cursor_enabled)
+        # Ask DXcam/WinRT to omit the yellow capture border when the OS allows it.
+        previous_border_env = os.environ.get(_WINRT_BORDER_ENV)
+        os.environ[_WINRT_BORDER_ENV] = "0"
 
     try:
         camera = dxcam.create(
@@ -153,6 +159,25 @@ def create_camera(
         )
     except CaptureError:
         raise
+    except ModuleNotFoundError as exc:
+        missing = str(exc)
+        if config.backend == "winrt" or "winrt" in missing.lower():
+            raise CaptureError(
+                failure_for(
+                    "BACKEND_UNAVAILABLE",
+                    "WinRT capture dependencies are missing from this build. "
+                    "Use the DXGI backend (Settings → Capture backend), or rebuild "
+                    "with dxcam[winrt] fully bundled.",
+                    exception=exc,
+                )
+            ) from exc
+        raise CaptureError(
+            failure_for(
+                "CAPTURE_INITIALIZATION_FAILED",
+                "Failed to create DXcam capture session.",
+                exception=exc,
+            )
+        ) from exc
     except Exception as exc:
         raise CaptureError(
             failure_for(
@@ -164,8 +189,39 @@ def create_camera(
     finally:
         if config.backend == "winrt":
             _restore_env(_WINRT_CURSOR_ENV, previous_cursor_env)
+            _restore_env(_WINRT_BORDER_ENV, previous_border_env)
 
     return camera
+
+
+def create_camera_with_fallback(
+    monitor: MonitorInfo,
+    config: CaptureConfiguration,
+    *,
+    dxcam_module: Any | None = None,
+) -> tuple[Any, str]:
+    """Create a camera; if WinRT deps are missing, fall back to DXGI.
+
+    Returns ``(camera, effective_backend)``.
+    """
+    try:
+        return create_camera(monitor, config, dxcam_module=dxcam_module), config.backend
+    except CaptureError as exc:
+        if config.backend != "winrt":
+            raise
+        cause = exc.__cause__
+        message = str(getattr(getattr(exc, "failure", None), "message", "") or exc)
+        missing_winrt = isinstance(cause, ModuleNotFoundError) or (
+            "winrt" in message.lower() and "missing" in message.lower()
+        )
+        if not missing_winrt:
+            raise
+        # Portable builds often omit winrt-* wheels even when Settings ask for winrt.
+        from dataclasses import replace
+
+        dxgi_config = replace(config, backend="dxgi", cursor_requested=False)
+        camera = create_camera(monitor, dxgi_config, dxcam_module=dxcam_module)
+        return camera, "dxgi"
 
 
 def release_camera(camera: Any) -> None:
@@ -205,6 +261,7 @@ class ScreenCaptureSession:
         self._camera = camera
         self._grabber = grabber
         self._owns_camera = camera is None and grabber is None
+        self._effective_backend = str(config.backend)
         self.slot: LatestFrameSlot[Any] = LatestFrameSlot()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -222,7 +279,15 @@ class ScreenCaptureSession:
             if self.monitor is None:
                 self.monitor = get_monitor(self.config.monitor)
             if self._camera is None:
-                self._camera = create_camera(self.monitor, self.config)
+                camera, effective_backend = create_camera_with_fallback(
+                    self.monitor, self.config
+                )
+                self._camera = camera
+                if effective_backend != self.config.backend:
+                    # Keep session config truthful for stats / UI without rewriting
+                    # the frozen dataclass in place (replace via object.__setattr__
+                    # is unnecessary — store on the session instead).
+                    self._effective_backend = effective_backend
             self._native_width = int(getattr(self._camera, "width", 0) or 0)
             self._native_height = int(getattr(self._camera, "height", 0) or 0)
 

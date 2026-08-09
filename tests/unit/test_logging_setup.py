@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
-from snowlink.logging_setup import SecretRedactionFilter
+from snowlink.logging_setup import SecretRedactionFilter, read_recent_log_lines
 
 
 def test_redacts_pairing_code_in_pairing_context() -> None:
@@ -36,3 +37,14 @@ def test_redacts_session_secret_key() -> None:
     )
     assert filt.filter(record) is True
     assert "abc123XYZ" not in record.getMessage()
+
+
+def test_read_recent_log_lines_tail(tmp_path: Path) -> None:
+    log_file = tmp_path / "snowlink.log"
+    log_file.write_text("\n".join(f"line-{i}" for i in range(20)) + "\n", encoding="utf-8")
+    lines = read_recent_log_lines(5, log_dir=tmp_path)
+    assert lines == [f"line-{i}" for i in range(15, 20)]
+
+
+def test_read_recent_log_lines_missing(tmp_path: Path) -> None:
+    assert read_recent_log_lines(10, log_dir=tmp_path) == []

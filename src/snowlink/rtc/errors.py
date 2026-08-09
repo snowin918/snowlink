@@ -167,8 +167,9 @@ _ACTIONS: dict[str, str] = {
         "Pass a dotted IPv4 such as 192.168.1.25 for --bind-ip / --source-ip."
     ),
     "IP_NOT_ASSIGNED": (
-        "Run `python experiments/experiment_a_adapter_bind.py list` and pick an "
-        "assigned physical LAN IPv4."
+        "Run Diagnostics → Refresh adapters and pick an assigned physical LAN IPv4. "
+        "If a VPN is connected, enable Allow LAN / local network access "
+        "(docs/vpn-lan-access.md), then Start Sharing again."
     ),
     "SIGNALING_BIND_FAILED": (
         "Confirm the IP is local, the port is free, and Windows Firewall allows the listen."
@@ -313,6 +314,39 @@ def map_exception(exc: BaseException) -> WebRTCFailure:
     """Map a generic exception onto a structured WebRTC failure."""
     if isinstance(exc, WebRTCError):
         return exc.failure
+    try:
+        from snowlink.media.capture_errors import CaptureError
+
+        if isinstance(exc, CaptureError):
+            cap = exc.failure
+            mapped = {
+                "DXCAM_NOT_INSTALLED": "CAPTURE_FAILED",
+                "BACKEND_UNAVAILABLE": "CAPTURE_FAILED",
+                "INVALID_MONITOR": "CAPTURE_FAILED",
+                "CAPTURE_INITIALIZATION_FAILED": "CAPTURE_FAILED",
+                "CAPTURE_FRAME_TIMEOUT": "CAPTURE_FAILED",
+                "MONITOR_DISCONNECTED": "CAPTURE_FAILED",
+                "SCALING_FAILED": "CAPTURE_FAILED",
+                "UNEXPECTED_CAPTURE_ERROR": "CAPTURE_FAILED",
+                "INVALID_CONFIGURATION": "CAPTURE_FAILED",
+            }.get(str(cap.code), "CAPTURE_FAILED")
+            detail = cap.message
+            if cap.exception_type:
+                # Preserve nested exception type when DXcam/COM fails inside create().
+                nested = getattr(exc, "__cause__", None)
+                if nested is not None:
+                    detail = f"{detail} ({type(nested).__name__}: {nested})"
+                else:
+                    detail = f"{detail} [{cap.code}]"
+            return failure_for(
+                mapped,
+                detail,
+                exception=exc,
+                likely_cause=cap.likely_cause or None,
+                suggested_next_step=cap.suggested_next_step or None,
+            )
+    except Exception:
+        pass
     try:
         from snowlink.media.audio_errors import AudioError
 

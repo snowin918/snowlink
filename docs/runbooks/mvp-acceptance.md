@@ -27,7 +27,13 @@ Manual two-machine checklist for Snowlink MVP (PLAN §14 / §17).
 | 2 h | Drift | `av_skew_ms` stays under ~100 ms or resync drops occur |
 | 8 h | Memory | Growth &lt; 50–100 MB after warmup; no unbounded climb |
 
-Record process CPU/memory via Task Manager or `psutil` at start, 30m, end.
+Record process CPU/memory via the Share/View stats panel (**CPU** / **RSS**) and/or:
+
+```powershell
+python scripts/dev/soak_sample.py --pid <SnowlinkPID> --duration-s 1800 --interval-s 30 --out soak-30m.jsonl
+```
+
+See [`mvp-ship-evidence.md`](mvp-ship-evidence.md) for dated results.
 
 ## Interrupt recovery
 

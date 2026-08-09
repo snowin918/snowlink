@@ -25,13 +25,18 @@ class SessionStats:
     frames_sent: int | None = None
     frames_received: int | None = None
     ice_state: str | None = None
+    cpu_percent: float | None = None
+    rss_mb: float | None = None
     updated_at: float = field(default_factory=time.monotonic)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    def format_lines(self) -> list[str]:
-        """Human-readable lines for the stats panel."""
+    def format_lines(self, *, compact: bool = False) -> list[str]:
+        """Human-readable lines for the stats panel.
+
+        ``compact=True`` shows FPS, resolution, bitrate, and RTT only.
+        """
 
         def _f(value: float | None, suffix: str = "", digits: int = 1) -> str:
             if value is None:
@@ -46,17 +51,24 @@ class SessionStats:
         if self.audio_peak is not None:
             # Show as percent of full scale for easier reading.
             peak = f"{min(100.0, self.audio_peak * 100.0):.0f}%"
-        return [
+        compact_lines = [
             f"Capture FPS: {_f(self.capture_fps)}",
             f"Render FPS: {_f(self.render_fps)}",
             f"Resolution: {res}",
             f"Bitrate: {_f(self.estimated_bitrate_kbps, ' kbps', 0)}",
             f"RTT: {_f(self.rtt_ms, ' ms', 0)}",
+        ]
+        if compact:
+            return compact_lines
+        return [
+            *compact_lines,
             f"Packet loss: {loss}",
             f"Dropped video: {self.dropped_video_frames}",
             f"Audio underruns: {self.audio_underruns}",
             f"Audio level: {peak}",
             f"A/V skew: {_f(self.av_skew_ms, ' ms', 0)}",
+            f"CPU: {_f(self.cpu_percent, '%', 0)}",
+            f"RSS: {_f(self.rss_mb, ' MB', 0)}",
         ]
 
 
@@ -79,6 +91,35 @@ class StatsSampler:
     _frames_received: int | None = None
     _av_skew_ms: float | None = None
     _audio_peak: float | None = None
+    _cpu_percent: float | None = None
+    _rss_mb: float | None = None
+    _resource: Any = field(default=None, repr=False)
+
+    def _ensure_resource_sampler(self) -> None:
+        if self._resource is not None:
+            return
+        try:
+            from snowlink.media.capture_metrics import ProcessResourceSampler
+
+            self._resource = ProcessResourceSampler()
+        except Exception:
+            self._resource = False  # type: ignore[assignment]
+
+    def sample_resources(self) -> None:
+        """Refresh process CPU% and RSS when psutil is available."""
+        self._ensure_resource_sampler()
+        sampler = self._resource
+        if not sampler or sampler is False:
+            return
+        try:
+            sampler.sample()
+            if sampler.cpu_samples:
+                self._cpu_percent = float(sampler.cpu_samples[-1])
+            rss = sampler._rss_mb()  # noqa: SLF001 — live panel needs current RSS
+            if rss is not None:
+                self._rss_mb = float(rss)
+        except Exception:
+            return
 
     def observe_local(
         self,
@@ -106,6 +147,7 @@ class StatsSampler:
         if audio_peak is not None:
             prev = self._audio_peak or 0.0
             self._audio_peak = max(prev, float(audio_peak))
+        self.sample_resources()
         return SessionStats(
             capture_fps=self._capture_fps,
             render_fps=self._render_fps,
@@ -121,6 +163,8 @@ class StatsSampler:
             frames_sent=self._frames_sent,
             frames_received=self._frames_received,
             ice_state=ice_state,
+            cpu_percent=self._cpu_percent,
+            rss_mb=self._rss_mb,
             updated_at=now,
         )
 

@@ -19,6 +19,8 @@ def test_session_stats_format_lines() -> None:
         dropped_video_frames=3,
         audio_underruns=1,
         av_skew_ms=12.0,
+        cpu_percent=22.0,
+        rss_mb=180.0,
     )
     text = "\n".join(stats.format_lines())
     assert "14.5" in text
@@ -26,6 +28,30 @@ def test_session_stats_format_lines() -> None:
     assert "1.0%" in text
     assert "Dropped video: 3" in text
     assert "A/V skew" in text
+    assert "CPU: 22%" in text
+    assert "RSS: 180 MB" in text
+
+
+def test_session_stats_format_lines_compact() -> None:
+    stats = SessionStats(
+        capture_fps=14.5,
+        render_fps=14.2,
+        width=854,
+        height=480,
+        estimated_bitrate_kbps=1200.0,
+        rtt_ms=18.0,
+        packet_loss=0.01,
+        dropped_video_frames=3,
+        cpu_percent=22.0,
+        rss_mb=180.0,
+    )
+    compact = "\n".join(stats.format_lines(compact=True))
+    assert "14.5" in compact
+    assert "854×480" in compact
+    assert "RTT" in compact
+    assert "Dropped video" not in compact
+    assert "CPU" not in compact
+    assert "Packet loss" not in compact
 
 
 def test_stats_sampler_fps_share() -> None:

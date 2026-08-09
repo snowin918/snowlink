@@ -9,7 +9,43 @@ ExperimentId = Literal["a", "b", "c", "d", "e", "f"]
 SESSION_NAMES = ("vpn-on-on",)
 BACKENDS = ("dxgi", "winrt")
 PRESETS = ("low", "balanced", "high")
+PRESET_LABELS: dict[str, str] = {
+    "low": "Lower quality",
+    "balanced": "Balanced",
+    "high": "Higher quality (experimental)",
+}
 MACHINE_LABELS = ("computer-a", "computer-b")
+
+
+def populate_preset_combo(combo: object, *, current: str = "low") -> None:
+    """Fill a QComboBox with preset keys in userData and labeled display text."""
+    clear = getattr(combo, "clear", None)
+    add_item = getattr(combo, "addItem", None)
+    find_data = getattr(combo, "findData", None)
+    set_index = getattr(combo, "setCurrentIndex", None)
+    if clear is None or add_item is None:
+        return
+    clear()
+    for key in PRESETS:
+        add_item(PRESET_LABELS.get(key, key), key)
+    if find_data is not None and set_index is not None:
+        idx = find_data(current if current in PRESETS else "low")
+        if idx >= 0:
+            set_index(idx)
+
+
+def preset_from_combo(combo: object, *, default: str = "low") -> str:
+    """Read the preset key from a combo populated by ``populate_preset_combo``."""
+    data = getattr(combo, "currentData", lambda: None)()
+    if isinstance(data, str) and data in PRESETS:
+        return data
+    text = str(getattr(combo, "currentText", lambda: default)() or default).strip().lower()
+    if text in PRESETS:
+        return text
+    for key, label in PRESET_LABELS.items():
+        if text == label.lower():
+            return key
+    return default if default in PRESETS else "low"
 
 
 def build_experiment_a_argv(
@@ -194,7 +230,7 @@ def build_experiment_e_argv(
     bind_ip: str = "",
     remote_ip: str = "",
     source_ip: str = "",
-    port: int = 3848,
+    port: int = 3847,
     duration: float = 120.0,
     session_name: str = "unnamed",
     width: int = 1280,

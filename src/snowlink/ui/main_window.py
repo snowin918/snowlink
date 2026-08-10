@@ -234,6 +234,7 @@ class MainWindow(QMainWindow):
             )
             win.setWindowIcon(self.windowIcon())
             win.native_video_surface.surface_changed.connect(self._view.native_surface_changed)
+            win.native_video_surface.input_event.connect(self._view.native_input_event)
             self._view_session_window = win
         return self._view_session_window
 

@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <deque>
 #include "encoder.h"
+#include "input.h"
 
 namespace snowlink {
 
@@ -47,6 +48,7 @@ public:
     int32_t stop_receiver();
     int32_t receiver_resize();
     int32_t receiver_set_visible(bool visible);
+    int32_t send_remote_input(const RemoteInputEvent& event);
     int32_t get_decoder_info(std::string& name, bool& hardware, std::uint32_t& width,
                              std::uint32_t& height, double& fps) const;
 
@@ -65,6 +67,8 @@ public:
 private:
     static void transport_keyframe_request(void* context);
     static void transport_access_unit(void* context, const std::uint8_t* data, std::size_t size, std::uint64_t timestamp);
+    static void transport_cursor_message(void* context,const std::uint8_t* data,std::size_t size);
+    static void transport_input_message(void* context,const std::uint8_t* data,std::size_t size);
     void stream_loop(StreamConfig config);
     void receive_loop();
     void set_last_error(const char* message) noexcept;
@@ -91,6 +95,7 @@ private:
     std::deque<EncodedFrame> receive_queue_;
     std::uint64_t receive_frame_id_ = 0;
     bool awaiting_keyframe_ = true;
+    CaptureConfig capture_config_{};
 };
 
 } // namespace snowlink

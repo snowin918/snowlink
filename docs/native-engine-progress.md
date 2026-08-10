@@ -423,4 +423,74 @@ Build validation on 2026-08-10:
 
 ## Next phase
 
-Next phase: implement native cursor and remote-input path.
+## Native cursor and remote input
+
+Cursor pixels are no longer part of the video path. WGC cursor composition is
+disabled for the separate-cursor mode and DXGI continues to retain duplication
+pointer metadata without drawing it into the capture texture. A dedicated native
+cursor sampler also uses `GetCursorInfo`/`GetIconInfo`, which supplies cursor
+state while WGC excludes the cursor and supplies complete standard, monochrome,
+and application-defined cursor resources. It polls independently at 8 ms; it
+does not wait for capture, preprocessing, or the encoder.
+
+The normalized state is `(x, y, visible, shape_id, hotspot_x, hotspot_y,
+timestamp)`. Shapes are normalized to premultiplied-capable BGRA32 with width,
+height, hotspot, and a 64-bit content identity. The sender caches the last shape
+identity and sends shape pixels only when that identity changes. Motion is a
+packed, versioned 40-byte message. Shape messages are bounded by their declared
+dimensions and byte count; malformed/truncated messages are rejected.
+
+Three SCTP data channels share the already authenticated WebRTC peer:
+
+- `snowlink.cursor.motion` is unordered with zero retransmissions, so obsolete
+  positions do not block newer positions;
+- `snowlink.cursor.shape` is ordered/reliable, providing the shape cache before
+  it is used;
+- `snowlink.input` is ordered/reliable so button, wheel, key, modifier, and
+  key-up/key-down transitions are not intentionally dropped.
+
+The receiver keeps shape objects in a `shape_id` cache and renders the cursor in
+a transparent, non-activating layered window over the native video HWND. Cursor
+updates reposition that overlay immediately and never submit or encode a video
+frame. Hidden state hides the overlay. Hotspots are applied before placement.
+The receiver recomputes the aspect-preserving video rectangle from the current
+client and decoded source sizes, including letter/pillar boxing. Windows/Qt
+physical HWND coordinates plus the current client rectangle provide per-monitor
+DPI behavior; moving or resizing the window causes the next cursor update to
+re-evaluate the mapping.
+
+Viewer input events are captured by the native video surface. Mouse coordinates
+are inverse-mapped through the same aspect/letterbox geometry into decoded source
+coordinates. The sharer maps those coordinates into the selected monitor's
+desktop rectangle, including negative multi-monitor offsets, then uses absolute
+virtual-desktop `SendInput`. Left/right/middle buttons, wheel, native virtual-key
+down/up, modifiers, and Windows special keys use the reliable input channel.
+Mouse movement remains replaceable at the SCTP layer while transitions remain
+ordered.
+
+Thread ownership is separated: capture owns its backend thread/callback; the
+cursor sampler owns its lightweight polling thread; libdatachannel owns network
+callbacks; decoder and renderer retain their workers. Cursor overlay updates do
+not take the encoder queue or video render worker. Input injection occurs only
+on the sharer after strict wire validation.
+
+The authorization boundary remains the existing signaling model. Merely
+starting capture initializes input with authorization disabled. Authorization is
+enabled only when the post-pairing, post-approval transport is connected and the
+sharer enters the active streaming state, and is revoked on stream/capture stop. No C ABI call
+can directly enable it. An unauthenticated injection attempt returns
+`ERROR_ACCESS_DENIED`; cursor display never grants input authority.
+
+`snowlink_cursor_input_protocol_test` covers state and shape round trips,
+negative coordinates, hotspots, shape payload validation, input transitions,
+sequences, and invalid protocol versions. Release build validation on 2026-08-10
+compiled the native DLL and test, the protocol executable passed, Python package
+compilation passed, and native lifecycle/backend tests passed 7/7. Interactive
+two-machine validation is still required for all system cursors, custom animated
+cursors, mixed-DPI monitor transitions, fullscreen, negative-offset monitors,
+and injected keyboard layouts because the automation desktop cannot provide a
+real approved remote-control session.
+
+## Next phase
+
+Next phase: integrate native engine as Snowlink's default backend and remove Python hot-path processing.

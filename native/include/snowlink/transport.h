@@ -38,6 +38,8 @@ public:
     using KeyframeRequest = void (*)(void* context);
     using AccessUnitCallback = void (*)(void* context, const std::uint8_t* data,
                                         std::size_t size, std::uint64_t timestamp);
+    using ControlCallback = void (*)(void* context, const std::uint8_t* data,
+                                     std::size_t size);
 
     Transport();
     ~Transport();
@@ -45,14 +47,18 @@ public:
     Transport& operator=(const Transport&) = delete;
 
     int32_t initialize(const TransportConfig& config, KeyframeRequest on_keyframe,
-                       void* keyframe_context);
+                       void* keyframe_context, ControlCallback on_input=nullptr,
+                       void* control_context=nullptr);
     int32_t initialize_receiver(const TransportConfig& config, AccessUnitCallback callback,
-                                void* callback_context);
+                                void* callback_context, ControlCallback on_cursor=nullptr,
+                                void* control_context=nullptr);
     int32_t create_offer();
     int32_t create_answer();
     int32_t get_local_description(std::string& sdp, std::string& type) const;
     int32_t set_remote_description(const std::string& sdp, const std::string& type);
     int32_t enqueue(EncodedFrame frame);
+    int32_t send_cursor(std::vector<std::uint8_t> message, bool shape);
+    int32_t send_input(std::vector<std::uint8_t> message);
     int32_t request_remote_keyframe();
     int32_t get_stats(TransportStats& stats) const;
     int32_t shutdown();

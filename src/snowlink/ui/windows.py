@@ -22,6 +22,29 @@ class NativeVideoSurface(QWidget):
     """Qt layout participant backed by a stable child HWND."""
 
     surface_changed = Signal(bool)
+    input_event = Signal(object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def mouseMoveEvent(self, event: Any) -> None:  # noqa: N802
+        p=event.position();self.input_event.emit({"kind":1,"x":int(p.x()),"y":int(p.y()),"width":self.width(),"height":self.height()});super().mouseMoveEvent(event)
+    def mousePressEvent(self,event:Any)->None:  # noqa: N802
+        self.setFocus();self._mouse_button(event,True);super().mousePressEvent(event)
+    def mouseReleaseEvent(self,event:Any)->None:  # noqa: N802
+        self._mouse_button(event,False);super().mouseReleaseEvent(event)
+    def _mouse_button(self,event:Any,down:bool)->None:
+        buttons={Qt.MouseButton.LeftButton:1,Qt.MouseButton.RightButton:2,Qt.MouseButton.MiddleButton:3}
+        code=buttons.get(event.button());
+        if code:self.input_event.emit({"kind":2,"code":code,"down":down})
+    def wheelEvent(self,event:Any)->None:  # noqa: N802
+        self.input_event.emit({"kind":3,"delta":event.angleDelta().y()});super().wheelEvent(event)
+    def keyPressEvent(self,event:Any)->None:  # noqa: N802
+        if not event.isAutoRepeat():self.input_event.emit({"kind":4,"code":event.nativeVirtualKey()&255,"down":True});super().keyPressEvent(event)
+    def keyReleaseEvent(self,event:Any)->None:  # noqa: N802
+        if not event.isAutoRepeat():self.input_event.emit({"kind":4,"code":event.nativeVirtualKey()&255,"down":False});super().keyReleaseEvent(event)
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802
         super().resizeEvent(event)

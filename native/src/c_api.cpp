@@ -144,6 +144,7 @@ int32_t snowlink_engine_create_receiver_answer(void* h)noexcept{return h?static_
 int32_t snowlink_engine_stop_receiver(void* h)noexcept{return h?static_cast<SnowlinkEngine*>(h)->stop_receiver():-1;}
 int32_t snowlink_engine_receiver_resize(void* h)noexcept{return h?static_cast<SnowlinkEngine*>(h)->receiver_resize():-1;}
 int32_t snowlink_engine_receiver_set_visible(void* h,int32_t v)noexcept{return h?static_cast<SnowlinkEngine*>(h)->receiver_set_visible(v!=0):-1;}
+int32_t snowlink_engine_send_input(void*h,const SnowlinkInputEvent*e)noexcept{if(!h||!e)return-1;RemoteInputEvent x;x.kind=static_cast<InputKind>(e->kind);x.code=e->code;x.down=e->down!=0;x.x=e->x;x.y=e->y;x.delta=e->delta;x.sequence=e->sequence;return static_cast<SnowlinkEngine*>(h)->send_remote_input(x);}
 int32_t snowlink_engine_get_decoder_name(void* h,char* buffer,uint32_t size)noexcept{if(!h)return-1;std::string name;bool hw;uint32_t w,hh;double fps;auto r=static_cast<SnowlinkEngine*>(h)->get_decoder_info(name,hw,w,hh,fps);if(r)return r;uint32_t need=static_cast<uint32_t>(name.size()+1);if(!buffer||size<need)return static_cast<int32_t>(need);memcpy(buffer,name.c_str(),need);return 0;}
 int32_t snowlink_engine_get_decoder_status(void* h,int32_t* hw,uint32_t* w,uint32_t* height,double* fps)noexcept{if(!h||!hw||!w||!height||!fps)return-1;std::string name;bool hardware;auto r=static_cast<SnowlinkEngine*>(h)->get_decoder_info(name,hardware,*w,*height,*fps);*hw=hardware?1:0;return r;}
 

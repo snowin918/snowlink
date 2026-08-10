@@ -94,11 +94,19 @@ int32_t SnowlinkEngine::start_capture(const CaptureConfig& config) {
     }
 
     state_ = EngineState::Capturing;
+    capture_config_=config;
+    struct Find{int wanted,current=0;RECT rect{};bool found=false;} find{config.monitor_index};
+    EnumDisplayMonitors(nullptr,nullptr,[](HMONITOR,HDC,RECT*r,LPARAM p)->BOOL{auto&f=*reinterpret_cast<Find*>(p);if(f.current++==f.wanted){f.rect=*r;f.found=true;return FALSE;}return TRUE;},reinterpret_cast<LPARAM>(&find));
+    RECT desktop=find.found?find.rect:RECT{0,0,config.width,config.height};
+    input_->initialize();input_->set_source_desktop(desktop.left,desktop.top,desktop.right-desktop.left,desktop.bottom-desktop.top);
+    cursor_->initialize_sender(desktop,[this](const CursorState&s){if(transport_)transport_->send_cursor(encode_cursor_state(s),false);},[this](const CursorShape&s){if(transport_)transport_->send_cursor(encode_cursor_shape(s),true);});
     return 0;
 }
 
 int32_t SnowlinkEngine::stop_capture() {
     stop_stream();
+    if(input_)input_->set_authorized(false);
+    if(cursor_)cursor_->shutdown();
     if (capture_manager_) {
         capture_manager_->stop();
     }
@@ -128,12 +136,14 @@ int32_t SnowlinkEngine::start_stream(const StreamConfig& config) {
     const int32_t result = processor_->configure(processor_config);
     if (result != 0) return result;
     stop_stream_requested_ = false;
+    input_->set_authorized(true); // transport is connected and signaling already approved it
     state_ = EngineState::Streaming;
     stream_thread_ = std::thread([this, config] { stream_loop(config); });
     return 0;
 }
 
 int32_t SnowlinkEngine::stop_stream() {
+    if(input_)input_->set_authorized(false);
     stop_stream_requested_ = true;
     if (stream_thread_.joinable()) stream_thread_.join();
     if (encoder_) encoder_->shutdown();
@@ -144,7 +154,8 @@ int32_t SnowlinkEngine::stop_stream() {
 
 int32_t SnowlinkEngine::connect_transport(const TransportConfig& config) {
     if (!transport_ || (state_ != EngineState::Initialized && state_ != EngineState::Capturing)) return -1;
-    return transport_->initialize(config, &SnowlinkEngine::transport_keyframe_request, this);
+    return transport_->initialize(config, &SnowlinkEngine::transport_keyframe_request, this,
+                                  &SnowlinkEngine::transport_input_message, this);
 }
 
 int32_t SnowlinkEngine::create_transport_offer() {
@@ -157,7 +168,9 @@ int32_t SnowlinkEngine::get_transport_local_description(std::string& sdp, std::s
 
 int32_t SnowlinkEngine::set_transport_remote_description(const std::string& sdp,
                                                          const std::string& type) {
-    return transport_ ? transport_->set_remote_description(sdp, type) : -1;
+    if(!transport_)return -1;
+    const auto result=transport_->set_remote_description(sdp,type);
+    return result;
 }
 
 int32_t SnowlinkEngine::start_receiver(std::uint64_t hwnd_value, const TransportConfig& config) {
@@ -170,14 +183,16 @@ int32_t SnowlinkEngine::start_receiver(std::uint64_t hwnd_value, const Transport
     if(FAILED(hr))return hr;
     int32_t result=decoder_->initialize(device.Get()); if(result!=0)return result;
     result=renderer_->initialize(hwnd,device.Get()); if(result!=0){decoder_->shutdown();return result;}
-    result=transport_->initialize_receiver(config,&SnowlinkEngine::transport_access_unit,this);
+    result=transport_->initialize_receiver(config,&SnowlinkEngine::transport_access_unit,this,
+                                           &SnowlinkEngine::transport_cursor_message,this);
     if(result!=0){renderer_->shutdown();decoder_->shutdown();return result;}
-    stop_receive_requested_=false;awaiting_keyframe_=true;receive_thread_=std::thread([this]{receive_loop();});return 0;
+    cursor_->initialize_receiver(hwnd,1,1);stop_receive_requested_=false;awaiting_keyframe_=true;receive_thread_=std::thread([this]{receive_loop();});return 0;
 }
 int32_t SnowlinkEngine::create_receiver_answer(){return transport_?transport_->create_answer():-1;}
-int32_t SnowlinkEngine::stop_receiver(){stop_receive_requested_=true;receive_wake_.notify_all();if(receive_thread_.joinable())receive_thread_.join();{std::lock_guard lock(receive_mutex_);receive_queue_.clear();}if(transport_)transport_->shutdown();if(renderer_)renderer_->shutdown();if(decoder_)decoder_->shutdown();return 0;}
+int32_t SnowlinkEngine::stop_receiver(){stop_receive_requested_=true;receive_wake_.notify_all();if(receive_thread_.joinable())receive_thread_.join();{std::lock_guard lock(receive_mutex_);receive_queue_.clear();}if(cursor_)cursor_->shutdown();if(transport_)transport_->shutdown();if(renderer_)renderer_->shutdown();if(decoder_)decoder_->shutdown();return 0;}
 int32_t SnowlinkEngine::receiver_resize(){return renderer_?renderer_->resize():-1;}
 int32_t SnowlinkEngine::receiver_set_visible(bool v){return renderer_?renderer_->set_visible(v):-1;}
+int32_t SnowlinkEngine::send_remote_input(const RemoteInputEvent&e){return transport_?transport_->send_input(encode_input_event(e)):-1;}
 int32_t SnowlinkEngine::get_decoder_info(std::string& name,bool& hw,std::uint32_t& w,std::uint32_t& h,double& fps)const{if(!decoder_)return -1;const auto&i=decoder_->info();name=i.decoder_name;hw=i.hardware_accelerated;w=i.decoded_width;h=i.decoded_height;fps=i.decode_fps;return 0;}
 
 void SnowlinkEngine::transport_access_unit(void* context,const std::uint8_t* data,std::size_t size,std::uint64_t timestamp){
@@ -185,10 +200,12 @@ void SnowlinkEngine::transport_access_unit(void* context,const std::uint8_t* dat
     for(size_t i=0;i+4<size;++i)if(data[i]==0&&data[i+1]==0&&((data[i+2]==1&&((data[i+3]&31)==5))||(data[i+2]==0&&data[i+3]==1&&((data[i+4]&31)==5)))){frame.keyframe=true;break;}
     std::lock_guard lock(self->receive_mutex_);if(self->receive_queue_.size()>=2){self->receive_queue_.pop_front();++self->stats_.frames_dropped;}self->receive_queue_.push_back(std::move(frame));self->receive_wake_.notify_one();
 }
+void SnowlinkEngine::transport_cursor_message(void* context,const std::uint8_t*data,std::size_t size){if(!context)return;CursorState s;CursorShape shape;if(decode_cursor_message(data,size,&s,&shape)){auto*self=static_cast<SnowlinkEngine*>(context);if(size>1&&data[1]==1)self->cursor_->receive_state(s);else self->cursor_->receive_shape(shape);}}
+void SnowlinkEngine::transport_input_message(void* context,const std::uint8_t*data,std::size_t size){if(!context)return;RemoteInputEvent event;if(decode_input_event(data,size,event))static_cast<SnowlinkEngine*>(context)->input_->inject(event);}
 void SnowlinkEngine::receive_loop(){while(!stop_receive_requested_){EncodedFrame frame;{std::unique_lock lock(receive_mutex_);receive_wake_.wait(lock,[&]{return stop_receive_requested_||!receive_queue_.empty();});if(stop_receive_requested_)break;frame=std::move(receive_queue_.back());receive_queue_.clear();}
     if(awaiting_keyframe_&&!frame.keyframe)continue;ID3D11Texture2D* texture=nullptr;int32_t result=decoder_->decode(frame,&texture);
     if(result<0){awaiting_keyframe_=true;decoder_->reset();transport_->request_remote_keyframe();std::lock_guard lock(stats_mutex_);++stats_.frames_dropped;continue;}
-    if(frame.keyframe)awaiting_keyframe_=false;if(texture){renderer_->submit(texture,++receive_frame_id_);texture->Release();std::lock_guard lock(stats_mutex_);++stats_.frames_decoded;}
+    if(frame.keyframe)awaiting_keyframe_=false;if(texture){D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);cursor_->update_source_size(d.Width,d.Height);renderer_->submit(texture,++receive_frame_id_);texture->Release();std::lock_guard lock(stats_mutex_);++stats_.frames_decoded;}
 }}
 
 int32_t SnowlinkEngine::set_target_fps(int32_t target_fps) {

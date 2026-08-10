@@ -1,16 +1,38 @@
 #include "snowlink/cursor.h"
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstring>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
 
-namespace snowlink {
-
-CursorSubsystem::CursorSubsystem() = default;
-CursorSubsystem::~CursorSubsystem() = default;
-
-int32_t CursorSubsystem::initialize() {
-    return 0;
+namespace snowlink { namespace {
+#pragma pack(push,1)
+struct WireState{uint8_t version=1,type=1,visible=0,reserved=0;int32_t x=0,y=0;uint64_t shape=0;int16_t hx=0,hy=0;uint64_t timestamp=0;};
+struct WireShape{uint8_t version=1,type=2,format=1,reserved=0;uint64_t shape=0;uint16_t width=0,height=0;int16_t hx=0,hy=0;uint32_t bytes=0;};
+#pragma pack(pop)
+uint64_t hash_bytes(const uint8_t*p,size_t n){uint64_t h=1469598103934665603ull;while(n--){h^=*p++;h*=1099511628211ull;}return h;}
+uint64_t now_us(){return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
+bool icon_shape(HCURSOR cursor,CursorShape& out){ICONINFO ii{};if(!cursor||!GetIconInfo(cursor,&ii))return false;BITMAP bm{};HBITMAP bitmap=ii.hbmColor?ii.hbmColor:ii.hbmMask;if(!bitmap||!GetObject(bitmap,sizeof bm,&bm)){if(ii.hbmColor)DeleteObject(ii.hbmColor);if(ii.hbmMask)DeleteObject(ii.hbmMask);return false;}out.width=static_cast<uint16_t>(bm.bmWidth);out.height=static_cast<uint16_t>(ii.hbmColor?bm.bmHeight:bm.bmHeight/2);out.hotspot_x=static_cast<int16_t>(ii.xHotspot);out.hotspot_y=static_cast<int16_t>(ii.yHotspot);out.pixels.assign(static_cast<size_t>(out.width)*out.height*4,0);HDC dc=GetDC(nullptr);
+ if(ii.hbmColor){BITMAPINFO bi{};bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);bi.bmiHeader.biWidth=out.width;bi.bmiHeader.biHeight=-static_cast<LONG>(out.height);bi.bmiHeader.biPlanes=1;bi.bmiHeader.biBitCount=32;bi.bmiHeader.biCompression=BI_RGB;GetDIBits(dc,bitmap,0,out.height,out.pixels.data(),&bi,DIB_RGB_COLORS);}
+ else {const size_t stride=((out.width+31)/32)*4;std::vector<uint8_t>mask(stride*out.height*2);BITMAPINFO bi{};bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);bi.bmiHeader.biWidth=out.width;bi.bmiHeader.biHeight=-static_cast<LONG>(out.height*2);bi.bmiHeader.biPlanes=1;bi.bmiHeader.biBitCount=1;bi.bmiHeader.biCompression=BI_RGB;GetDIBits(dc,bitmap,0,out.height*2,mask.data(),&bi,DIB_RGB_COLORS);for(uint16_t y=0;y<out.height;++y)for(uint16_t x=0;x<out.width;++x){auto bit=[&](size_t row){return(mask[row*stride+x/8]>>(7-(x&7)))&1;};bool a=bit(y),xo=bit(y+out.height);auto*p=&out.pixels[(size_t(y)*out.width+x)*4];if(!a||xo){p[0]=p[1]=p[2]=xo?255:0;p[3]=255;}}}
+ ReleaseDC(nullptr,dc);if(ii.hbmColor)DeleteObject(ii.hbmColor);if(ii.hbmMask)DeleteObject(ii.hbmMask);out.shape_id=hash_bytes(out.pixels.data(),out.pixels.size())^out.hotspot_x^(static_cast<uint64_t>(out.hotspot_y)<<16);return true;}
 }
-
-int32_t CursorSubsystem::shutdown() {
-    return 0;
-}
-
+class CursorSubsystem::State{public:std::atomic<bool> stop{false};std::thread worker;RECT source{};StateCallback on_state;ShapeCallback on_shape;HWND video=nullptr,overlay=nullptr;uint32_t sw=0,sh=0;std::mutex mutex;std::condition_variable wake;bool dirty=false;std::unordered_map<uint64_t,CursorShape> shapes;CursorState latest{};uint64_t sent_shape=0;
+ void sender(){CursorState previous{};for(;!stop;std::this_thread::sleep_for(std::chrono::milliseconds(8))){CURSORINFO ci{sizeof ci};if(!GetCursorInfo(&ci))continue;CursorShape shape;if(ci.hCursor&&icon_shape(ci.hCursor,shape)&&shape.shape_id!=sent_shape){sent_shape=shape.shape_id;if(on_shape)on_shape(shape);}CursorState s;s.x=ci.ptScreenPos.x-source.left;s.y=ci.ptScreenPos.y-source.top;s.visible=(ci.flags&CURSOR_SHOWING)!=0;s.shape_id=sent_shape;s.hotspot_x=shape.hotspot_x;s.hotspot_y=shape.hotspot_y;s.timestamp=now_us();if(s.x!=previous.x||s.y!=previous.y||s.visible!=previous.visible||s.shape_id!=previous.shape_id){previous=s;if(on_state)on_state(s);}}}
+ void render(){std::lock_guard lock(mutex);if(!video||!IsWindow(video))return;if(!latest.visible){if(overlay)ShowWindow(overlay,SW_HIDE);return;}auto it=shapes.find(latest.shape_id);if(it==shapes.end())return;RECT cr{};GetClientRect(video,&cr);POINT origin{};ClientToScreen(video,&origin);double scale=std::min(double(cr.right)/std::max(1u,sw),double(cr.bottom)/std::max(1u,sh));int dw=int(sw*scale),dh=int(sh*scale),ox=(cr.right-dw)/2,oy=(cr.bottom-dh)/2;const auto&s=it->second;int x=origin.x+ox+int(latest.x*scale)-int(s.hotspot_x*scale),y=origin.y+oy+int(latest.y*scale)-int(s.hotspot_y*scale),w=std::max(1,int(s.width*scale)),h=std::max(1,int(s.height*scale));if(!overlay)overlay=CreateWindowExW(WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE,L"STATIC",L"",WS_POPUP,0,0,w,h,video,nullptr,GetModuleHandleW(nullptr),nullptr);HDC screen=GetDC(nullptr),mem=CreateCompatibleDC(screen);BITMAPINFO bi{};bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);bi.bmiHeader.biWidth=s.width;bi.bmiHeader.biHeight=-LONG(s.height);bi.bmiHeader.biPlanes=1;bi.bmiHeader.biBitCount=32;bi.bmiHeader.biCompression=BI_RGB;void*bits=nullptr;HBITMAP bmp=CreateDIBSection(screen,&bi,DIB_RGB_COLORS,&bits,nullptr,0);if(bits)memcpy(bits,s.pixels.data(),s.pixels.size());auto old=SelectObject(mem,bmp);POINT dst{x,y},src{};SIZE size{w,h};BLENDFUNCTION blend{AC_SRC_OVER,0,255,AC_SRC_ALPHA};UpdateLayeredWindow(overlay,screen,&dst,&size,mem,&src,0,&blend,ULW_ALPHA);SelectObject(mem,old);DeleteObject(bmp);DeleteDC(mem);ReleaseDC(nullptr,screen);ShowWindow(overlay,SW_SHOWNOACTIVATE);}
+ void receiver(){for(;;){{std::unique_lock lock(mutex);wake.wait(lock,[&]{return stop||dirty;});if(stop)break;dirty=false;}render();}if(overlay){DestroyWindow(overlay);overlay=nullptr;}}
+};
+CursorSubsystem::CursorSubsystem():state_(std::make_unique<State>()){}CursorSubsystem::~CursorSubsystem(){shutdown();}
+int32_t CursorSubsystem::initialize_sender(RECT r,StateCallback a,ShapeCallback b){shutdown();state_->source=r;state_->on_state=std::move(a);state_->on_shape=std::move(b);state_->stop=false;state_->worker=std::thread([this]{state_->sender();});return 0;}
+int32_t CursorSubsystem::initialize_receiver(HWND w,uint32_t sw,uint32_t sh){shutdown();if(!IsWindow(w))return E_INVALIDARG;state_->video=w;state_->sw=sw;state_->sh=sh;state_->stop=false;state_->worker=std::thread([this]{state_->receiver();});return 0;}
+int32_t CursorSubsystem::update_source_size(uint32_t w,uint32_t h){{std::lock_guard lock(state_->mutex);state_->sw=w;state_->sh=h;state_->dirty=true;}state_->wake.notify_one();return 0;}
+int32_t CursorSubsystem::receive_state(const CursorState&s){{std::lock_guard lock(state_->mutex);state_->latest=s;state_->dirty=true;}state_->wake.notify_one();return 0;}
+int32_t CursorSubsystem::receive_shape(const CursorShape&s){{std::lock_guard lock(state_->mutex);state_->shapes[s.shape_id]=s;state_->dirty=true;}state_->wake.notify_one();return 0;}
+int32_t CursorSubsystem::shutdown(){state_->stop=true;state_->wake.notify_all();if(state_->worker.joinable())state_->worker.join();state_->on_state={};state_->on_shape={};return 0;}
+std::vector<uint8_t> encode_cursor_state(const CursorState&s){WireState w;w.visible=s.visible;w.x=s.x;w.y=s.y;w.shape=s.shape_id;w.hx=s.hotspot_x;w.hy=s.hotspot_y;w.timestamp=s.timestamp;std::vector<uint8_t>b(sizeof w);memcpy(b.data(),&w,sizeof w);return b;}
+std::vector<uint8_t> encode_cursor_shape(const CursorShape&s){WireShape w;w.format=static_cast<uint8_t>(s.format);w.shape=s.shape_id;w.width=s.width;w.height=s.height;w.hx=s.hotspot_x;w.hy=s.hotspot_y;w.bytes=static_cast<uint32_t>(s.pixels.size());std::vector<uint8_t>b(sizeof w+s.pixels.size());memcpy(b.data(),&w,sizeof w);memcpy(b.data()+sizeof w,s.pixels.data(),s.pixels.size());return b;}
+bool decode_cursor_message(const uint8_t*d,size_t n,CursorState*s,CursorShape*shape){if(!d||n<2||d[0]!=1)return false;if(d[1]==1&&s&&n==sizeof(WireState)){WireState w;memcpy(&w,d,n);s->visible=w.visible!=0;s->x=w.x;s->y=w.y;s->shape_id=w.shape;s->hotspot_x=w.hx;s->hotspot_y=w.hy;s->timestamp=w.timestamp;return true;}if(d[1]==2&&shape&&n>=sizeof(WireShape)){WireShape w;memcpy(&w,d,sizeof w);if(w.bytes!=n-sizeof w||w.bytes!=size_t(w.width)*w.height*4)return false;shape->shape_id=w.shape;shape->width=w.width;shape->height=w.height;shape->hotspot_x=w.hx;shape->hotspot_y=w.hy;shape->format=static_cast<CursorPixelFormat>(w.format);shape->pixels.assign(d+sizeof w,d+n);return true;}return false;}
 } // namespace snowlink

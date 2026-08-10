@@ -57,6 +57,8 @@ class _TransportConfig(ctypes.Structure):
         ("frame_queue_limit", ctypes.c_uint32),
         ("nack_packet_limit", ctypes.c_uint32),
     ]
+class _InputEvent(ctypes.Structure):
+    _fields_ = [("kind",ctypes.c_uint8),("code",ctypes.c_uint8),("down",ctypes.c_uint8),("reserved",ctypes.c_uint8),("x",ctypes.c_int32),("y",ctypes.c_int32),("delta",ctypes.c_int32),("sequence",ctypes.c_uint64)]
 
 
 class _EngineStats(ctypes.Structure):
@@ -166,6 +168,8 @@ def _bind(dll: ctypes.CDLL) -> None:
         fn.argtypes = [ctypes.c_void_p]
     dll.snowlink_engine_receiver_set_visible.restype = ctypes.c_int32
     dll.snowlink_engine_receiver_set_visible.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    dll.snowlink_engine_send_input.restype=ctypes.c_int32
+    dll.snowlink_engine_send_input.argtypes=[ctypes.c_void_p,ctypes.POINTER(_InputEvent)]
     dll.snowlink_engine_get_decoder_name.restype = ctypes.c_int32
     dll.snowlink_engine_get_decoder_name.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
     dll.snowlink_engine_get_decoder_status.restype = ctypes.c_int32
@@ -406,6 +410,14 @@ class NativeEngine:
 
     def receiver_set_visible(self, visible: bool) -> None:
         self._check(int(self._dll.snowlink_engine_receiver_set_visible(self._handle, int(visible))))
+
+    def send_input(self, *, kind: int, code: int = 0, down: bool = False,
+                   x: int = 0, y: int = 0, delta: int = 0, sequence: int = 0) -> None:
+        event=_InputEvent(kind,code,int(down),0,x,y,delta,sequence)
+        # A channel which is still opening is not an authorization failure; UI
+        # input is simply ignored until DTLS/SCTP is ready.
+        status=int(self._dll.snowlink_engine_send_input(self._handle,ctypes.byref(event)))
+        if status < 0:self._check(status)
 
     def decoder_status(self) -> dict[str, Any]:
         required = int(self._dll.snowlink_engine_get_decoder_name(self._handle, None, 0))

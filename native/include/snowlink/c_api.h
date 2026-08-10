@@ -36,6 +36,11 @@ typedef struct SnowlinkTransportConfig {
     uint32_t frame_queue_limit;
     uint32_t nack_packet_limit;
 } SnowlinkTransportConfig;
+typedef struct SnowlinkInputEvent {
+    uint8_t kind, code, down, reserved;
+    int32_t x, y, delta;
+    uint64_t sequence;
+} SnowlinkInputEvent;
 
 typedef struct SnowlinkEngineStats {
     double capture_fps;
@@ -92,6 +97,7 @@ SNOWLINK_API int32_t snowlink_engine_create_receiver_answer(void* engine_handle)
 SNOWLINK_API int32_t snowlink_engine_stop_receiver(void* engine_handle) noexcept;
 SNOWLINK_API int32_t snowlink_engine_receiver_resize(void* engine_handle) noexcept;
 SNOWLINK_API int32_t snowlink_engine_receiver_set_visible(void* engine_handle, int32_t visible) noexcept;
+SNOWLINK_API int32_t snowlink_engine_send_input(void* engine_handle, const SnowlinkInputEvent* event) noexcept;
 SNOWLINK_API int32_t snowlink_engine_get_decoder_name(void* engine_handle, char* buffer, uint32_t buffer_size) noexcept;
 SNOWLINK_API int32_t snowlink_engine_get_decoder_status(void* engine_handle, int32_t* hardware, uint32_t* width, uint32_t* height, double* fps) noexcept;
 SNOWLINK_API int32_t snowlink_engine_set_target_fps(void* engine_handle, int32_t target_fps) noexcept;

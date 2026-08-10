@@ -55,6 +55,8 @@ target_link_libraries(snowlink_engine
         mfreadwrite
         mfuuid
         oleaut32
+        user32
+        gdi32
         LibDataChannel::LibDataChannelStatic
 )
 
@@ -113,6 +115,13 @@ if (SNOWLINK_BUILD_TRANSPORT_TEST)
         target_compile_options(snowlink_transport_packet_test PRIVATE /W4 /permissive-)
     endif()
 endif()
+
+add_executable(snowlink_cursor_input_protocol_test
+    tools/cursor_input_protocol_test.cpp src/cursor/cursor.cpp src/input/input.cpp)
+target_include_directories(snowlink_cursor_input_protocol_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_definitions(snowlink_cursor_input_protocol_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(snowlink_cursor_input_protocol_test PRIVATE user32 gdi32)
+set_target_properties(snowlink_cursor_input_protocol_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin)
 
 option(SNOWLINK_BUILD_ENCODER_BENCHMARK "Build the capture-to-hardware-encode benchmark" ON)
 if (SNOWLINK_BUILD_ENCODER_BENCHMARK)

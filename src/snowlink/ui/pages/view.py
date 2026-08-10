@@ -143,6 +143,20 @@ class ViewPage(QWidget):
         except Exception:
             pass
 
+    def native_input_event(self, event: dict[str, Any]) -> None:
+        engine=self._native_engine
+        if engine is None:return
+        try:
+            if event.get("kind")==1:
+                status=engine.decoder_status();sw=int(status["decoded_width"]);sh=int(status["decoded_height"])
+                dw=max(1,int(event["width"]));dh=max(1,int(event["height"]));scale=min(dw/sw,dh/sh) if sw and sh else 1.0
+                ox=(dw-sw*scale)/2;oy=(dh-sh*scale)/2
+                x=max(0,min(sw-1,int((event["x"]-ox)/scale)));y=max(0,min(sh-1,int((event["y"]-oy)/scale)))
+                engine.send_input(kind=1,x=x,y=y)
+            else:engine.send_input(**event)
+        except Exception:
+            pass
+
     def _connect(self) -> None:
         if self._session.is_running:
             QMessageBox.warning(self, "Busy", "Already connected or connecting.")

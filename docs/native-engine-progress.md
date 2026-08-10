@@ -2,179 +2,163 @@
 
 ## Architecture
 
-Snowlink keeps the PySide6 / Python application for UI, settings, login/device list
-(future), session orchestration, pairing, and configuration.
-
-High-frequency media work moves into a native C++ engine (`native/`) that owns:
+Python/PySide6 remains the control plane. Uncompressed frames do not cross the
+C ABI. The native video path is now:
 
 ```
-PyQt / Python application
-        |
-        | small control API (C ABI DLL + ctypes)
-        v
-Native C++ Snowlink Engine
-        |
-        +-- Capture
-        |    +-- Windows.Graphics.Capture   (next phase)
-        |    +-- DXGI Desktop Duplication   (later)
-        |
-        +-- D3D11 GPU processing
-        +-- Hardware video encoder
-        +-- Native network/media transport
-        +-- Native decoder
-        +-- D3D11 renderer
-        +-- Cursor subsystem
-        +-- Input subsystem
+GraphicsCaptureItem (monitor)
+  -> Direct3D11CaptureFramePool::CreateFreeThreaded (2 WGC buffers)
+  -> IDirect3D11Texture2D via IDirect3DDxgiInterfaceAccess
+  -> GPU CopyResource into a 2-slot Snowlink-owned latest-frame pool
+  -> future native encoder
 ```
 
-**Hard boundary:** uncompressed video frames never cross into Python.
-The intended hot path is `Capture → D3D11 → encoder → transport` entirely in native code.
-Python issues commands and receives events / statistics only.
+There is no staging texture, `Map`, CPU readback, Python bytes, NumPy, OpenCV,
+Qt image, or CPU BGRA step in this path. The legacy Python DXcam/aiortc path is
+unchanged and remains the shipping stream path until the later encoder and
+transport phases are complete.
 
-Two selectable **media engines** (orthogonal to the existing DXcam capture backend
-`dxgi` / `winrt`):
+## WGC implementation
 
-| Preference value   | Meaning |
-|--------------------|---------|
-| `legacy_python`    | Current DXcam + aiortc / PyAV pipeline (default, fully working). |
-| `native_cpp`       | Native engine foundation. Init/shutdown/stats work; streaming not wired yet. Sessions still run on `legacy_python`. |
+- `native/include/snowlink/capture/wgc_capture_backend.h`: GPU texture producer
+  API and status/stats access.
+- `native/src/capture/wgc_capture_backend.cpp`: WGC monitor interop, D3D11
+  device, free-threaded frame pool, GPU frame copy, resize, access/device-loss
+  detection, border/cursor controls, and ordered shutdown.
+- `native/src/capture/capture_manager.cpp`: backend selection and ownership.
+  Native backend `1` is WGC; `0` is reserved for Desktop Duplication.
+- `native/tools/capture_test.cpp`: GPU-only development benchmark.
+- `packaging/msix/AppxManifest.xml`: package manifest template containing the
+  supported restricted `graphicsCaptureWithoutBorder` capability.
+- `native/include/snowlink/c_api.h`, `native/src/c_api.cpp`, and
+  `src/snowlink/native_engine/engine.py`: control/status exposure to Python.
 
-## Existing Python Reference
+## Device and frame ownership
 
-| Area | Path | Role today |
-|------|------|------------|
-| Screen capture | `src/snowlink/media/screen_capture.py` | DXcam DXGI (default) / WinRT; `LatestFrameSlot` |
-| Capture models | `src/snowlink/media/capture_models.py` | Presets, `dxgi`/`winrt` backend names |
-| Video track / encode prep | `src/snowlink/media/video_track.py` | BGR → PyAV `yuv420p` for aiortc |
-| Encode / decode | aiortc + PyAV | Software VP8 (no first-party encoder/decoder) |
-| Share/view session | `src/snowlink/rtc/screen_session.py` | End-to-end WebRTC session |
-| Peer connection | `src/snowlink/rtc/peer_connection.py` | Host ICE, VP8/Opus prefs |
-| Viewer frames | `src/snowlink/rtc/preview.py` | Decode drain → BGR for Qt |
-| Signaling | `src/snowlink/net/signaling_server.py`, `signaling_client.py` | Sharer-hosted WebSocket |
-| Cursor | `screen_capture.resolve_cursor_policy` | WinRT env knob; DXGI unsupported |
-| Remote input | *(none)* | Out of MVP; native `IInputSubsystem` stub reserved |
-| UI integration | `src/snowlink/ui/share_controller.py`, `workers.py`, `pages/*` | PySide6 control plane |
-| Packaging | `packaging/snowlink-gui.spec`, `scripts/dev/build_gui_exe.py` | PyInstaller onedir |
+Each `WgcCaptureBackend` owns one hardware D3D11 device and immediate context,
+created with `D3D11_CREATE_DEVICE_BGRA_SUPPORT`. That device is wrapped with
+`CreateDirect3D11DeviceFromDXGIDevice` for WGC. The future processor/encoder
+must consume textures from this same device or explicitly use D3D shared-resource
+synchronization.
 
-## Native Files
+WGC owns/recycles its frame-pool surfaces. The frame callback obtains their
+underlying `ID3D11Texture2D` using `IDirect3DDxgiInterfaceAccess`, then executes
+`ID3D11DeviceContext::CopyResource` into one of two Snowlink-owned default-usage
+textures. Publishing replaces the stale slot. `get_latest_frame` returns an
+AddRef'd COM pointer; the caller releases it. This gives the consumer stable GPU
+resource ownership without keeping a recyclable WGC frame alive and without CPU
+readback. Replacements are counted when a producer overwrites a frame not yet
+acquired by the consumer.
 
-Created in this phase:
+## Threading and shutdown
 
+The backend uses `Direct3D11CaptureFramePool::CreateFreeThreaded`; `FrameArrived`
+runs on the pool's internal worker thread and never on the PyQt thread. A mutex
+protects the two-slot publication state; atomics hold cheap counters/status.
+
+Shutdown marks the backend stopping, unregisters `FrameArrived` and item-closed
+handlers, closes the session and frame pool, waits (bounded to two seconds) for
+in-flight callbacks, releases queued textures, then releases the WinRT and D3D
+objects. Weak callback ownership prevents callbacks from resurrecting or using a
+destroyed backend.
+
+## Resize, display changes, and loss behavior
+
+The callback compares `Direct3D11CaptureFrame::ContentSize` with the published
+size. A change reallocates both native GPU textures and calls frame-pool
+`Recreate`; this handles resolution/orientation/display-mode changes without CPU
+frames. `GraphicsCaptureItem::Closed` marks access lost and capture inactive.
+D3D11 `GetDeviceRemovedReason` marks device loss and capture inactive. These are
+exposed to the control plane; stop followed by start recreates the capture target,
+device, pool, and session cleanly. Automatic retry policy is intentionally left
+to session orchestration so unplugged displays do not create an infinite native
+retry loop.
+
+## Borderless capture
+
+Snowlink uses only the documented flow:
+
+1. Confirm the process has package identity and the access API is present.
+2. Call `GraphicsCaptureAccess::RequestAccessAsync(Borderless)`.
+3. If Windows returns `Allowed`, call `GraphicsCaptureSession::IsBorderRequired(false)`.
+4. Otherwise continue capture with the system border.
+
+`borderless_capture_available`, `borderless_capture_granted`, and
+`capture_border_active` are exposed through the C ABI and Python wrapper.
+Unpackaged development builds report borderless unavailable and do not call the
+restricted API. Release packaging must provide package identity and declare:
+
+```xml
+<rescap:Capability Name="graphicsCaptureWithoutBorder" />
 ```
-native/CMakeLists.txt
-native/include/snowlink/
-  types.h, engine.h, capture.h, encoder.h, decoder.h,
-  renderer.h, transport.h, cursor.h, input.h, c_api.h
-native/src/
-  engine.cpp, c_api.cpp
-  capture/capture_manager.cpp
-  encode/encoder.cpp
-  decode/decoder.cpp
-  render/renderer.cpp
-  transport/transport.cpp
-  cursor/cursor.cpp
-  input/input.cpp
-  common/factories.h, status_util.h
-scripts/dev/build_native_engine.ps1
-src/snowlink/native_engine/
-  __init__.py, backend.py, loader.py, engine.py
-docs/native-engine-progress.md
-tests/unit/test_native_engine_backend.py
-tests/unit/test_native_engine_lifecycle.py
-```
 
-Also updated: `src/snowlink/config.py` (`media_engine`), `config/default.toml`,
-`src/snowlink/ui/pages/settings.py` (Media engine combo), `.gitignore`,
-`tests/unit/test_config.py`.
+The template at `packaging/msix/AppxManifest.xml` does this. Its publisher,
+version, and asset placeholders must be replaced/signing configured in the
+packaging phase. Permission denial is non-fatal; Snowlink keeps the supported
+Windows capture border. No overlay, cropping, DWM manipulation, patching, or
+security-UI suppression is used.
 
-## Build
+## Programmatic monitor capture and cursor
 
-Requirements: Visual Studio 2022 (MSVC), Windows 10/11 SDK, CMake (VS-bundled is fine).
+Snowlink preserves zero-based monitor selection by enumerating monitors with
+`EnumDisplayMonitors`, then uses the documented
+`IGraphicsCaptureItemInterop::CreateForMonitor`. This desktop interop is available
+from Windows 10 version 1903 (build 18362) and does not require the picker.
+Package identity is needed for the restricted borderless capability, not for
+ordinary programmatic monitor interop.
 
-From the repo root:
+`capture_cursor_in_video` is exposed before and during capture and maps to
+`GraphicsCaptureSession::IsCursorCaptureEnabled`. It defaults to `false` on the
+native path in preparation for separate cursor metadata. On systems where that
+session interface is unavailable, the setter failure is handled without touching
+pixels; the status remains truthful about the requested/applied native setting.
+
+## OS and fallback requirements
+
+- Programmatic monitor WGC: Windows 10 1903 / build 18362 or newer.
+- Free-threaded frame pool: Windows 10 1809 or newer (therefore covered above).
+- Cursor toggle: Windows 10 2004 / build 19041 or newer.
+- Borderless access/session control: Windows Server 2022 build 20348 or Windows
+  11, plus package identity, manifest capability, and user/administrator policy.
+- If WGC is unsupported or initialization fails, native start returns an HRESULT
+  (or `-4` for unsupported). The current application remains on the working
+  `legacy_python` path. Borderless denial alone never fails capture.
+
+## Build and test
+
+From the repository root:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/dev/build_native_engine.ps1
+native\build\bin\Release\snowlink_capture_test.exe --monitor 0 --seconds 10
+native\build\bin\Release\snowlink_capture_test.exe --monitor 1 --seconds 30 --cursor
 ```
 
-Or manually:
+The benchmark initializes D3D11/WGC, acquires AddRef'd GPU textures, counts new
+frame IDs, and reports produced/observed frames, FPS, resolution, replaced
+frames, pool recreations, border state, and cursor state. It never maps or copies
+a frame to CPU.
 
-```powershell
-$cmake = "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
-& $cmake -S native -B native/build -G "Visual Studio 17 2022" -A x64
-& $cmake --build native/build --config Release
-```
+Validation on 2026-08-09:
 
-Output DLL (typical):
+- Release DLL and `snowlink_capture_test.exe` compile successfully with VS 2022
+  and Windows SDK 10.0.26100.
+- The current automated execution desktop cannot start the Windows capture
+  service (`0x80070424`, `ERROR_SERVICE_DOES_NOT_EXIST`), so live frame/FPS proof
+  must be run in an interactive Windows desktop session with Screen Capture
+  services available. The benchmark reports the startup HRESULT cleanly.
 
-`native/build/bin/Release/snowlink_engine.dll`
+## Remaining problems
 
-Optional override for the Python loader:
+- Run and record the benchmark on an interactive physical/VM Windows desktop;
+  the present automation session has no WGC capture service.
+- Complete production MSIX identity/signing/assets and restricted-capability
+  submission before promising borderless capture in release builds.
+- Wire the GPU latest-frame consumer into the later hardware encoder.
+- Add orchestration retry/backoff for access/device loss after display topology
+  settles.
+- Native Desktop Duplication fallback is not implemented yet.
 
-```powershell
-$env:SNOWLINK_ENGINE_DLL = "C:\path\to\snowlink_engine.dll"
-```
+## Next phase
 
-Verify from Python (with `src` on `PYTHONPATH` or editable install):
-
-```powershell
-python -c "from snowlink.native_engine import probe_native_engine; print(probe_native_engine())"
-```
-
-## Completed
-
-- Native CMake/MSVC project builds `snowlink_engine.dll` (C++20).
-- Public C++ subsystem interfaces + engine lifecycle (`initialize` / `shutdown`,
-  control setters, `get_stats`).
-- Stable C ABI (`snowlink/c_api.h`) for Python.
-- Python ctypes wrapper (`snowlink.native_engine`) — control/status only.
-- `media_engine` preference: `legacy_python` | `native_cpp` (default legacy).
-- Settings UI exposes Media engine without changing Share/View behavior.
-- Existing Python media path untouched and still the production session backend.
-- D3D11 / DXGI / Media Foundation / `windowsapp` linked so the SDK surface is ready.
-
-## Not Implemented
-
-- Windows.Graphics.Capture (native)
-- DXGI Desktop Duplication (native)
-- D3D11 frame processing / scaling
-- Hardware encoder / decoder
-- Native media transport / packetization
-- D3D11 renderer
-- Cursor compositing in native code
-- Remote input injection
-- Replacing aiortc session path with native streaming
-- Shipping the DLL inside the PyInstaller bundle (next packaging phase)
-
-`start_capture` / `start_stream` / `request_keyframe` return `SNOWLINK_ERR_NOT_IMPLEMENTED`
-by design in this foundation build.
-
-## Important Decisions
-
-1. **Interface choice:** stable **C ABI DLL + ctypes**, not pybind11. Matches existing
-   Win32 ctypes usage and keeps PyInstaller packaging simple (`snowlink_engine.dll`
-   beside the exe later).
-2. **No frames to Python.** Never: GPU frame → Python → encoder.
-3. **`media_engine` ≠ capture `backend`.** `backend` remains `dxgi`/`winrt` for the
-   legacy DXcam path. `media_engine` selects legacy vs native pipeline.
-4. **Sessions stay on legacy** until native capture + encode + transport are real.
-   Selecting `native_cpp` only enables probing the native lifecycle.
-5. **Preserve Python media code** as the behavioral reference; do not delete it.
-6. **RAII / ComPtr:** prefer `std::unique_ptr` and (in later phases)
-   `Microsoft::WRL::ComPtr` / C++/WinRT for COM and WinRT objects.
-7. **Stats** are cheap counters/gauges — no per-frame logging across the FFI.
-
-## Next Phase
-
-Next phase: implement Windows.Graphics.Capture native backend.
-
-## Definition of done
-
-This phase is complete when:
-
-- Native C++ project builds successfully.
-- Snowlink still launches without regressions.
-- Native engine initialization is invokable from Python.
-- Native engine can cleanly initialize and shutdown.
-- No screen capture has been migrated yet unless trivial initialization is required.
-- Existing Python media behavior remains intact.
+Next phase: implement DXGI Desktop Duplication backend.

@@ -33,6 +33,8 @@ public:
     int32_t set_target_fps(int32_t target_fps);
     int32_t set_bitrate(int32_t bitrate_bps);
     int32_t set_resolution(int32_t width, int32_t height);
+    int32_t set_capture_cursor_in_video(bool enabled);
+    int32_t get_capture_status(CaptureStatus& out_status) const;
 
     int32_t request_keyframe();
 

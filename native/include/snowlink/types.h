@@ -18,6 +18,25 @@ struct CaptureConfig {
     std::int32_t height = 0;
     std::int32_t target_fps = 0;
     std::int32_t backend = 0; // 0 = DXGI, 1 = WinRT
+    std::uint64_t display_id = 0; // optional WinRT DisplayId when using WinRT backend
+};
+
+struct CaptureStatus {
+    bool borderless_capture_available = false;
+    bool borderless_capture_granted = false;
+    bool capture_border_active = true;
+    bool capture_cursor_in_video = false;
+    bool capture_active = false;
+    bool access_lost = false;
+    bool device_lost = false;
+    std::int32_t width = 0;
+    std::int32_t height = 0;
+};
+
+struct CaptureBackendStats {
+    std::uint64_t frames_captured = 0;
+    std::uint64_t frames_replaced = 0;
+    std::uint64_t frame_pool_recreates = 0;
 };
 
 struct StreamConfig {

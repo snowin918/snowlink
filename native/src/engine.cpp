@@ -73,10 +73,26 @@ int32_t SnowlinkEngine::start_capture(const CaptureConfig& config) {
         set_last_error("Engine is not initialized.");
         return -1;
     }
-    return -4;
+    if (!capture_manager_) {
+        set_last_error("Capture manager not initialized.");
+        return -1;
+    }
+
+    int32_t res = capture_manager_->start(config);
+    if (res != 0) {
+        set_last_error("Failed to start capture");
+        return res;
+    }
+
+    state_ = EngineState::Capturing;
+    return 0;
 }
 
 int32_t SnowlinkEngine::stop_capture() {
+    if (capture_manager_) {
+        capture_manager_->stop();
+    }
+    state_ = EngineState::Initialized;
     return 0;
 }
 
@@ -106,12 +122,34 @@ int32_t SnowlinkEngine::set_resolution(int32_t width, int32_t height) {
     return 0;
 }
 
+int32_t SnowlinkEngine::set_capture_cursor_in_video(bool enabled) {
+    if (!capture_manager_) {
+        set_last_error("Capture manager not initialized.");
+        return -1;
+    }
+    return capture_manager_->set_capture_cursor_in_video(enabled);
+}
+
+int32_t SnowlinkEngine::get_capture_status(CaptureStatus& out_status) const {
+    if (!capture_manager_) {
+        return -1;
+    }
+    return capture_manager_->get_capture_status(out_status);
+}
+
 int32_t SnowlinkEngine::request_keyframe() {
     return -4;
 }
 
 int32_t SnowlinkEngine::get_stats(EngineStats& out_stats) const {
     out_stats = stats_;
+    if (capture_manager_) {
+        CaptureBackendStats capture_stats{};
+        if (capture_manager_->get_stats(capture_stats) == 0) {
+            out_stats.frames_captured = capture_stats.frames_captured;
+            out_stats.frames_dropped = capture_stats.frames_replaced;
+        }
+    }
     return 0;
 }
 

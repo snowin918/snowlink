@@ -35,6 +35,7 @@ class _CaptureConfig(ctypes.Structure):
         ("height", ctypes.c_int32),
         ("target_fps", ctypes.c_int32),
         ("backend", ctypes.c_int32),
+        ("display_id", ctypes.c_uint64),
     ]
 
 
@@ -129,6 +130,12 @@ def _bind(dll: ctypes.CDLL) -> None:
         ctypes.c_int32,
     ]
 
+    dll.snowlink_engine_set_capture_cursor_in_video.restype = ctypes.c_int32
+    dll.snowlink_engine_set_capture_cursor_in_video.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+
+    dll.snowlink_engine_get_capture_status.restype = ctypes.c_int32
+    dll.snowlink_engine_get_capture_status.argtypes = [ctypes.c_void_p, ctypes.POINTER(_CaptureStatus)]
+
     dll.snowlink_engine_request_keyframe.restype = ctypes.c_int32
     dll.snowlink_engine_request_keyframe.argtypes = [ctypes.c_void_p]
 
@@ -164,6 +171,33 @@ def probe_native_engine() -> dict[str, Any]:
     finally:
         engine.shutdown()
         engine.destroy()
+
+
+class _CaptureStatus(ctypes.Structure):
+    _fields_ = [
+        ("borderless_capture_available", ctypes.c_int32),
+        ("borderless_capture_granted", ctypes.c_int32),
+        ("capture_border_active", ctypes.c_int32),
+        ("capture_cursor_in_video", ctypes.c_int32),
+        ("capture_active", ctypes.c_int32),
+        ("access_lost", ctypes.c_int32),
+        ("device_lost", ctypes.c_int32),
+        ("width", ctypes.c_int32),
+        ("height", ctypes.c_int32),
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class NativeCaptureStatus:
+    borderless_capture_available: bool
+    borderless_capture_granted: bool
+    capture_border_active: bool
+    capture_cursor_in_video: bool
+    capture_active: bool
+    access_lost: bool
+    device_lost: bool
+    width: int
+    height: int
 
 
 class NativeEngine:
@@ -225,9 +259,10 @@ class NativeEngine:
         height: int = 0,
         target_fps: int = 30,
         backend: int = 0,
+        display_id: int = 0,
     ) -> int:
         self._ensure_alive()
-        cfg = _CaptureConfig(monitor_index, width, height, target_fps, backend)
+        cfg = _CaptureConfig(monitor_index, width, height, target_fps, backend, display_id)
         return self._check(
             int(self._dll.snowlink_engine_start_capture(self._handle, ctypes.byref(cfg))),
             allow_not_implemented=True,
@@ -281,6 +316,28 @@ class NativeEngine:
         return self._check(
             int(self._dll.snowlink_engine_request_keyframe(self._handle)),
             allow_not_implemented=True,
+        )
+
+    def set_capture_cursor_in_video(self, enabled: bool) -> int:
+        self._ensure_alive()
+        return self._check(
+            int(self._dll.snowlink_engine_set_capture_cursor_in_video(self._handle, int(enabled)))
+        )
+
+    def get_capture_status(self) -> NativeCaptureStatus:
+        self._ensure_alive()
+        raw = _CaptureStatus()
+        self._check(int(self._dll.snowlink_engine_get_capture_status(self._handle, ctypes.byref(raw))))
+        return NativeCaptureStatus(
+            borderless_capture_available=bool(raw.borderless_capture_available),
+            borderless_capture_granted=bool(raw.borderless_capture_granted),
+            capture_border_active=bool(raw.capture_border_active),
+            capture_cursor_in_video=bool(raw.capture_cursor_in_video),
+            capture_active=bool(raw.capture_active),
+            access_lost=bool(raw.access_lost),
+            device_lost=bool(raw.device_lost),
+            width=int(raw.width),
+            height=int(raw.height),
         )
 
     def get_stats(self) -> NativeEngineStats:

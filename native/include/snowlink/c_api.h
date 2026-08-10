@@ -18,6 +18,7 @@ typedef struct SnowlinkCaptureConfig {
     int32_t height;
     int32_t target_fps;
     int32_t backend;
+    uint64_t display_id;
 } SnowlinkCaptureConfig;
 
 typedef struct SnowlinkStreamConfig {
@@ -43,6 +44,18 @@ typedef struct SnowlinkEngineStats {
     double network_rtt_ms;
 } SnowlinkEngineStats;
 
+typedef struct SnowlinkCaptureStatus {
+    int32_t borderless_capture_available;
+    int32_t borderless_capture_granted;
+    int32_t capture_border_active;
+    int32_t capture_cursor_in_video;
+    int32_t capture_active;
+    int32_t access_lost;
+    int32_t device_lost;
+    int32_t width;
+    int32_t height;
+} SnowlinkCaptureStatus;
+
 SNOWLINK_API const char* snowlink_engine_version() noexcept;
 SNOWLINK_API int32_t snowlink_engine_create(void** engine_handle) noexcept;
 SNOWLINK_API int32_t snowlink_engine_destroy(void* engine_handle) noexcept;
@@ -56,6 +69,8 @@ SNOWLINK_API int32_t snowlink_engine_set_target_fps(void* engine_handle, int32_t
 SNOWLINK_API int32_t snowlink_engine_set_bitrate(void* engine_handle, int32_t bitrate_bps) noexcept;
 SNOWLINK_API int32_t snowlink_engine_set_resolution(void* engine_handle, int32_t width, int32_t height) noexcept;
 SNOWLINK_API int32_t snowlink_engine_request_keyframe(void* engine_handle) noexcept;
+SNOWLINK_API int32_t snowlink_engine_set_capture_cursor_in_video(void* engine_handle, int32_t enabled) noexcept;
+SNOWLINK_API int32_t snowlink_engine_get_capture_status(void* engine_handle, SnowlinkCaptureStatus* status) noexcept;
 SNOWLINK_API int32_t snowlink_engine_get_stats(void* engine_handle, SnowlinkEngineStats* stats) noexcept;
 SNOWLINK_API int32_t snowlink_engine_get_state(void* engine_handle) noexcept;
 SNOWLINK_API const char* snowlink_engine_last_error(void* engine_handle) noexcept;

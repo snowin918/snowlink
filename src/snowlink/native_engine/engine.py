@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from snowlink.constants import NATIVE_MEDIA_PORT_MAX, NATIVE_MEDIA_PORT_MIN
 from snowlink.native_engine.loader import find_engine_dll, load_engine_dll
 
 logger = logging.getLogger(__name__)
@@ -386,8 +387,8 @@ class NativeEngine:
         self,
         *,
         bind_address: str,
-        port_min: int = 1024,
-        port_max: int = 65535,
+        port_min: int = NATIVE_MEDIA_PORT_MIN,
+        port_max: int = NATIVE_MEDIA_PORT_MAX,
         mtu: int = 1200,
         frame_queue_limit: int = 2,
         nack_packet_limit: int = 256,
@@ -438,7 +439,14 @@ class NativeEngine:
 
     def start_receiver(self, *, hwnd: int, bind_address: str = "") -> None:
         self._ensure_alive()
-        cfg = _TransportConfig(bind_address.encode(), 1024, 65535, 1200, 2, 256)
+        cfg = _TransportConfig(
+            bind_address.encode(),
+            NATIVE_MEDIA_PORT_MIN,
+            NATIVE_MEDIA_PORT_MAX,
+            1200,
+            2,
+            256,
+        )
         self._check(
             int(
                 self._dll.snowlink_engine_start_receiver(self._handle, int(hwnd), ctypes.byref(cfg))

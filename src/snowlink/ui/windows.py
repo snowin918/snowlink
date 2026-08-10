@@ -202,15 +202,14 @@ class ViewSessionWindow(QWidget):
         row.addStretch(1)
         layout.addLayout(row)
 
-        self._video = QLabel("Waiting for video…")
-        self._video.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._video.setMinimumHeight(240)
-        self._video.setObjectName("videoPlaceholder")
-        self._video.setStyleSheet(
+        placeholder = QLabel("Waiting for video…")
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder.setMinimumHeight(240)
+        placeholder.setObjectName("videoPlaceholder")
+        placeholder.setStyleSheet(
             "background:#ECEFF1; color:#546E7A; border-radius:12px; border:1px solid #BBDEFB;"
         )
-        layout.addWidget(self._video, stretch=1)
-        placeholder = self._video
+        layout.addWidget(placeholder, stretch=1)
         self._video = NativeVideoSurface()
         self._video.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         self._video.setMinimumHeight(240)
@@ -226,8 +225,7 @@ class ViewSessionWindow(QWidget):
         self._stats = StatsPanel(collapsed=True)
         layout.addWidget(self._stats)
 
-        self._fullscreen_window: QWidget | None = None
-        self._fullscreen_label: QLabel | None = None
+        self._fullscreen = False
 
     def set_muted(self, muted: bool) -> None:
         self._mute.blockSignals(True)
@@ -259,14 +257,6 @@ class ViewSessionWindow(QWidget):
             Qt.TransformationMode.FastTransformation,
         )
         self._video.setPixmap(scaled)
-        if self._fullscreen_label is not None and self._fullscreen_window is not None:
-            self._fullscreen_label.setPixmap(
-                pixmap.scaled(
-                    self._fullscreen_window.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.FastTransformation,
-                )
-            )
 
     def _mute_toggled(self, checked: bool) -> None:
         if self._on_mute_changed is not None:
@@ -277,42 +267,18 @@ class ViewSessionWindow(QWidget):
             self._on_disconnect()
 
     def _toggle_fullscreen(self) -> None:
-        if self._fullscreen_window is not None and self._fullscreen_window.isVisible():
-            self.layout().insertWidget(1, self._video, 1)
-            self._fullscreen_window.close()
-            self._fullscreen_window = None
-            self._fullscreen_label = None
+        if self._fullscreen:
+            self.showNormal()
+            self._fullscreen = False
             self._fullscreen_btn.setText("Fullscreen")
             return
-        win = QWidget()
-        win.setWindowTitle("Snowlink — Fullscreen")
-        win.setStyleSheet("background:#000;")
-        lay = QVBoxLayout(win)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self._video)
-        label = QLabel()
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        if self._last_pixmap is not None:
-            screen = win.screen()
-            size = screen.availableGeometry().size() if screen is not None else self._video.size()
-            label.setPixmap(
-                self._last_pixmap.scaled(
-                    size,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
-        win.showFullScreen()
-        self._fullscreen_window = win
-        self._fullscreen_label = label
+        # Keep the D3D11-backed child on its original parent so its HWND stays stable.
+        self.showFullScreen()
+        self._fullscreen = True
         self._fullscreen_btn.setText("Exit fullscreen")
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        if self._fullscreen_window is not None:
-            self.layout().insertWidget(1, self._video, 1)
-            self._fullscreen_window.close()
-            self._fullscreen_window = None
-            self._fullscreen_label = None
+        self._fullscreen = False
         if self._on_disconnect is not None:
             self._on_disconnect()
         super().closeEvent(event)

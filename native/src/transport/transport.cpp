@@ -32,6 +32,7 @@ public:
     std::thread sender;
     bool stopping = false;
     bool local_ready = false;
+    bool gathering_complete = false;
     std::string local_sdp;
     std::string local_type;
     TransportStats stats;
@@ -117,9 +118,15 @@ int32_t Transport::initialize_receiver(const TransportConfig& config, AccessUnit
                 std::lock_guard lock(state_->mutex);if(label=="snowlink.cursor.motion")state_->cursor_motion=channel;else state_->cursor_shape=channel;
             } else if(label=="snowlink.input") { std::lock_guard lock(state_->mutex);state_->input=channel; }
         });
-        auto receiving=std::make_shared<rtc::RtcpReceivingSession>();
-        receiving->addToChain(std::make_shared<rtc::H264RtpDepacketizer>(rtc::NalUnit::Separator::StartSequence));
-        track->setMediaHandler(receiving);
+        // Incoming handlers run from the tail of the chain back to its root.
+        // RTP/RTCP classification must therefore run first, followed by H.264
+        // depacketization.  The former order reconstructed H.264 and then fed
+        // it to RtcpReceivingSession as if it were an RTP packet, which dropped
+        // every received video frame.
+        auto depacketizer=std::make_shared<rtc::H264RtpDepacketizer>(
+            rtc::NalUnit::Separator::StartSequence);
+        depacketizer->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
+        track->setMediaHandler(depacketizer);
         track->onMessage([this](rtc::binary data) {
             AccessUnitCallback cb=nullptr; void* ctx=nullptr;
             { std::lock_guard lock(state_->mutex); cb=state_->access_unit_callback; ctx=state_->access_unit_context; }
@@ -127,7 +134,20 @@ int32_t Transport::initialize_receiver(const TransportConfig& config, AccessUnit
                 static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count()/100));
         }, nullptr);
-        peer->onLocalDescription([this](rtc::Description d){std::lock_guard lock(state_->mutex);state_->local_sdp=static_cast<std::string>(d);state_->local_type=d.typeString();state_->local_ready=true;});
+        // Snowlink signaling is deliberately non-trickle.  onLocalDescription
+        // fires before libdatachannel has appended gathered host candidates, so
+        // publishing the SDP here produces an offer/answer which can never form
+        // an ICE pair.  Wait for GatheringState::Complete and then read the
+        // peer's current description, which includes every gathered candidate.
+        peer->onLocalDescription([this](rtc::Description d){
+            std::lock_guard lock(state_->mutex);
+            state_->local_type=d.typeString();
+        });
+        peer->onGatheringStateChange([this](rtc::PeerConnection::GatheringState s){
+            if(s!=rtc::PeerConnection::GatheringState::Complete)return;
+            std::lock_guard lock(state_->mutex);
+            state_->gathering_complete=true;
+        });
         peer->onStateChange([this](rtc::PeerConnection::State s){std::lock_guard lock(state_->mutex);state_->stats.connected=s==rtc::PeerConnection::State::Connected;if(s==rtc::PeerConnection::State::Failed)++state_->stats.transport_errors;});
         std::lock_guard lock(state_->mutex); state_->config=config;state_->peer=std::move(peer);state_->track=std::move(track);
         state_->access_unit_callback=callback;state_->access_unit_context=context;state_->cursor_callback=cursor_callback;state_->control_context=control_context;state_->stopping=false; return 0;
@@ -181,9 +201,12 @@ int32_t Transport::initialize(const TransportConfig& config, KeyframeRequest cal
         track->onOpen([this] { state_->wake.notify_all(); });
         peer->onLocalDescription([this](rtc::Description description) {
             std::lock_guard lock(state_->mutex);
-            state_->local_sdp = static_cast<std::string>(description);
             state_->local_type = description.typeString();
-            state_->local_ready = true;
+        });
+        peer->onGatheringStateChange([this](rtc::PeerConnection::GatheringState gathering_state) {
+            if (gathering_state != rtc::PeerConnection::GatheringState::Complete) return;
+            std::lock_guard lock(state_->mutex);
+            state_->gathering_complete = true;
         });
         peer->onStateChange([this](rtc::PeerConnection::State connection_state) {
             std::lock_guard lock(state_->mutex);
@@ -215,7 +238,7 @@ int32_t Transport::send_input(std::vector<uint8_t> message){std::shared_ptr<rtc:
 
 int32_t Transport::create_offer() {
     std::shared_ptr<rtc::PeerConnection> peer;
-    { std::lock_guard lock(state_->mutex); peer = state_->peer; state_->local_ready = false; }
+    { std::lock_guard lock(state_->mutex); peer = state_->peer; state_->local_ready = false; state_->gathering_complete = false; }
     if (!peer) return -1;
     try { peer->setLocalDescription(rtc::Description::Type::Offer); return 0; }
     catch (...) { return -2; }
@@ -223,7 +246,7 @@ int32_t Transport::create_offer() {
 
 int32_t Transport::create_answer() {
     std::shared_ptr<rtc::PeerConnection> peer;
-    { std::lock_guard lock(state_->mutex); peer=state_->peer; state_->local_ready=false; }
+    { std::lock_guard lock(state_->mutex); peer=state_->peer; state_->local_ready=false; state_->gathering_complete=false; }
     if(!peer)return -1; try{peer->setLocalDescription(rtc::Description::Type::Answer);return 0;}catch(...){return -2;}
 }
 
@@ -233,9 +256,31 @@ int32_t Transport::request_remote_keyframe() {
 }
 
 int32_t Transport::get_local_description(std::string& sdp, std::string& type) const {
-    std::lock_guard lock(state_->mutex);
-    if (!state_->local_ready) return 1;
-    sdp = state_->local_sdp; type = state_->local_type; return 0;
+    std::shared_ptr<rtc::PeerConnection> peer;
+    {
+        std::lock_guard lock(state_->mutex);
+        if (!state_->gathering_complete) return 1;
+        if (state_->local_ready) {
+            sdp = state_->local_sdp;
+            type = state_->local_type;
+            return 0;
+        }
+        peer = state_->peer;
+    }
+    if (!peer) return -1;
+    try {
+        const auto description = peer->localDescription();
+        if (!description) return 1;
+        sdp = static_cast<std::string>(*description);
+        type = description->typeString();
+        std::lock_guard lock(state_->mutex);
+        state_->local_sdp = sdp;
+        state_->local_type = type;
+        state_->local_ready = true;
+        return 0;
+    } catch (...) {
+        return -2;
+    }
 }
 
 int32_t Transport::set_remote_description(const std::string& sdp, const std::string& type) {
@@ -261,10 +306,18 @@ int32_t Transport::enqueue(EncodedFrame frame) {
 }
 
 int32_t Transport::get_stats(TransportStats& stats) const {
-    std::lock_guard lock(state_->mutex);
-    stats = state_->stats;
-    if (state_->peer) {
-        if (auto rtt = state_->peer->rtt()) stats.rtt = static_cast<double>(rtt->count());
+    // Do not call into libdatachannel while holding the Snowlink state lock.
+    // libdatachannel may concurrently invoke one of our callbacks while holding
+    // its own internal lock; taking the locks in the opposite order here can
+    // deadlock the stats thread and, subsequently, Qt input dispatch.
+    std::shared_ptr<rtc::PeerConnection> peer;
+    {
+        std::lock_guard lock(state_->mutex);
+        stats = state_->stats;
+        peer = state_->peer;
+    }
+    if (peer) {
+        if (auto rtt = peer->rtt()) stats.rtt = static_cast<double>(rtt->count());
     }
     return 0;
 }
@@ -284,7 +337,7 @@ int32_t Transport::shutdown() {
     std::lock_guard lock(state_->mutex);
     state_->track.reset(); state_->rtp.reset();state_->cursor_motion.reset();state_->cursor_shape.reset();state_->input.reset(); state_->peer.reset();
     state_->access_unit_callback=nullptr; state_->access_unit_context=nullptr;
-    state_->local_ready = false; state_->stats.connected = false;
+    state_->local_ready = false; state_->gathering_complete = false; state_->stats.connected = false;
     return 0;
 }
 

@@ -33,6 +33,18 @@ rtc::binary depacketize(rtc::message_vector messages) {
     if (messages.size() != 1) return {};
     return rtc::binary(messages.front()->begin(), messages.front()->end());
 }
+
+rtc::binary receive_chain(rtc::message_vector messages) {
+    // MediaHandler incoming traversal is tail-to-root. This mirrors the real
+    // receiver and prevents regressions where a reconstructed H.264 access unit
+    // is incorrectly passed into RtcpReceivingSession and discarded as bad RTP.
+    auto depacketizer = std::make_shared<rtc::H264RtpDepacketizer>(
+        rtc::NalUnit::Separator::StartSequence);
+    depacketizer->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
+    depacketizer->incomingChain(messages, nullptr);
+    if (messages.size() != 1) return {};
+    return rtc::binary(messages.front()->begin(), messages.front()->end());
+}
 }
 
 int main() {
@@ -43,6 +55,10 @@ int main() {
         std::cerr << "packet exceeded path MTU\n"; return 2;
     }
     if (depacketize(packets) != frame) { std::cerr << "ordered reconstruction failed\n"; return 3; }
+    if (receive_chain(packets) != frame) {
+        std::cerr << "RTCP plus H.264 receive chain discarded the access unit\n";
+        return 6;
+    }
 
     auto reordered = packets;
     std::reverse(reordered.begin(), reordered.end() - 1); // marker remains the flush boundary

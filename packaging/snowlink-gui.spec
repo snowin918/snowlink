@@ -12,17 +12,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules
-
 SPECDIR = Path(SPEC).resolve().parent  # type: ignore[name-defined]
 ROOT = SPECDIR.parent
 SRC = ROOT / "src"
-EXPERIMENTS = ROOT / "experiments"
 ENTRY = SPECDIR / "snowlink_gui_entry.py"
 
 # PySide6 (and optional media stacks if installed in the build venv)
 datas: list = [
-    (str(EXPERIMENTS), "experiments"),
     (str(ROOT / "logo"), "logo"),
 ]
 binaries: list = []
@@ -53,78 +49,15 @@ hiddenimports: list = [
     "snowlink.ui.pages.view",
     "snowlink.ui.pages.settings",
     "snowlink.session_history",
-    "experiment_a_adapter_bind",
-    "experiment_b_two_machine_tcp",
-    "experiment_c_screen_capture",
-    "experiment_d_audio_loopback",
-    "experiment_e_webrtc_video",
-    "experiment_f_webrtc_audio",
 ]
-hiddenimports += collect_submodules("snowlink")
 
 # Include media/audio stacks when present in the build venv. PyAudioWPatch
 # must be collect_all'd — analysis alone may pull only _portaudiowpatch.pyd
 # and omit the importable ``pyaudiowpatch`` package (breaks system-audio share).
 # winrt-* packages are required for DXcam backend=winrt in the portable exe.
-for pkg in (
-    "PySide6",
-    "shiboken6",
-    "dxcam",
-    "cv2",
-    "av",
-    "aiortc",
-    "aiohttp",
-    "pyaudiowpatch",
-    "winrt",
-    "winrt.runtime",
-    "winrt.system",
-    "winrt.windows.foundation",
-    "winrt.windows.foundation.collections",
-    "winrt.windows.graphics",
-    "winrt.windows.graphics.capture",
-    "winrt.windows.graphics.capture.interop",
-    "winrt.windows.graphics.directx",
-    "winrt.windows.graphics.directx.direct3d11",
-    "winrt.windows.graphics.directx.direct3d11.interop",
-):
-    try:
-        pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
-        datas += pkg_datas
-        binaries += pkg_binaries
-        hiddenimports += pkg_hidden
-    except Exception:
-        # Optional dependency not installed in the build environment.
-        pass
-hiddenimports += [
-    "pyaudiowpatch",
-    "pyaudiowpatch.__main__",
-    "_portaudiowpatch",
-    "numpy",
-    "winrt",
-    "winrt.runtime",
-    "winrt.system",
-    "winrt.windows.graphics.capture",
-    "winrt.windows.graphics.capture.interop",
-    "winrt.windows.graphics.directx",
-    "winrt.windows.graphics.directx.direct3d11",
-    "winrt.windows.graphics.directx.direct3d11.interop",
-]
-# Namespace / binary winrt modules often need explicit submodule collection.
-for pkg in (
-    "winrt",
-    "winrt.windows",
-    "winrt.windows.graphics",
-    "winrt.windows.graphics.capture",
-    "winrt.windows.graphics.directx",
-):
-    try:
-        hiddenimports += collect_submodules(pkg)
-    except Exception:
-        pass
-
 a = Analysis(  # noqa: F821  # type: ignore[name-defined]
     [str(ENTRY)],
-    pathex=[str(SRC), str(EXPERIMENTS), str(ROOT), str(SPECDIR)],
+    pathex=[str(SRC), str(ROOT), str(SPECDIR)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -136,6 +69,29 @@ a = Analysis(  # noqa: F821  # type: ignore[name-defined]
         "mypy",
         "ruff",
         "tkinter",
+        "aiortc",
+        "aioice",
+        "av",
+        "cv2",
+        "dxcam",
+        "numpy",
+        "pyaudiowpatch",
+        "sounddevice",
+        "winrt",
+        "snowlink.media.audio_format",
+        "snowlink.media.audio_pipeline",
+        "snowlink.media.audio_playback",
+        "snowlink.media.audio_ring_buffer",
+        "snowlink.media.audio_track",
+        "snowlink.media.loopback_capture",
+        "snowlink.media.screen_capture",
+        "snowlink.media.video_track",
+        "snowlink.rtc.audio_receiver",
+        "snowlink.rtc.av_sync",
+        "snowlink.rtc.peer_connection",
+        "snowlink.rtc.preview",
+        "snowlink.rtc.synthetic_audio",
+        "snowlink.rtc.synthetic_video",
     ],
     noarchive=False,
     optimize=0,

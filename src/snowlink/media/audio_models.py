@@ -19,6 +19,14 @@ DEFAULT_BUFFER_MS = 160
 DEFAULT_GAIN = 0.7
 SAMPLES_PER_FRAME_48K_20MS = 960  # per channel
 
+
+@dataclass(slots=True)
+class AudioPlaybackControls:
+    """Mutable viewer playback controls shared by native and legacy engines."""
+
+    muted: bool = False
+    gain: float = 0.25
+
 MIN_DURATION_S = 1
 MAX_DURATION_S = 3600
 MIN_SAMPLE_RATE = 8_000

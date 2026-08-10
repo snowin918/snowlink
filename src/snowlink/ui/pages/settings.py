@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -123,7 +125,11 @@ class SettingsPage(QWidget):
         adv_form.addRow("Capture backend", self._backend)
 
         self._media_backend = QComboBox()
-        self._media_backend.addItems(["native_cpp", "legacy_python"])
+        self._media_backend.addItems(
+            ["native_cpp"]
+            if getattr(sys, "frozen", False)
+            else ["native_cpp", "legacy_python"]
+        )
         self._media_backend.setToolTip(
             "native_cpp keeps video frames, encoding, transport, decoding, "
             "rendering, cursor and input in C++. "

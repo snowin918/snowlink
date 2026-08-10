@@ -10,58 +10,62 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from snowlink.constants import DEFAULT_SIGNALING_PORT
+from snowlink.constants import (
+    DEFAULT_SIGNALING_PORT,
+    NATIVE_MEDIA_PORT_MAX,
+    NATIVE_MEDIA_PORT_MIN,
+)
+from snowlink.logging_setup import log_file_path
 from snowlink.media.audio_models import (
     DEFAULT_FRAME_MS,
     TARGET_CHANNELS,
     TARGET_SAMPLE_RATE,
 )
-from snowlink.media.audio_track import AudioPlaybackControls, LoopbackAudioTrack, ShareAudioCapture
 from snowlink.media.capture_models import (
     DEFAULT_PRESET,
     CaptureConfiguration,
     PresetName,
     resolve_preset,
 )
-from snowlink.media.screen_capture import ScreenCaptureSession
-from snowlink.media.video_track import ScreenVideoTrack
 from snowlink.net.adapter_models import NetworkAdapter
 from snowlink.net.adapter_selection import select_preferred_endpoint
 from snowlink.net.signaling_client import WsSignalingClient
 from snowlink.net.signaling_server import WsSignalingServer
-from snowlink.net.tcp_diagnostics import validate_ipv4
+from snowlink.net.tcp_diagnostics import resolve_local_endpoint, validate_ipv4
 from snowlink.platform_win.adapters import enumerate_adapters, is_windows
-from snowlink.rtc.audio_receiver import PlaybackWorker, RemoteAudioConsumer
-from snowlink.rtc.av_sync import AvSyncController
 from snowlink.rtc.errors import WebRTCError, failure_for, format_failure_human, map_exception
-from snowlink.rtc.ice_policy import apply_ice_policy_to_local_description
 from snowlink.rtc.models import (
     DEFAULT_AUDIO_GAIN,
     DEFAULT_BUFFER_TARGET_MS,
     TimeoutConfig,
 )
-from snowlink.rtc.peer_connection import (
-    assert_opus_available,
-    assert_preferred_video_codec_available,
-    create_peer_connection,
-    prefer_audio_codec,
-    prefer_video_codec,
-    preferred_host_ip_of,
-    require_aiortc,
-    wait_ice_connected,
-    wait_ice_gathering_complete,
-)
-from snowlink.rtc.preview import RemoteVideoConsumer, run_preview_loop
-from snowlink.rtc.session import validate_local_ip
 from snowlink.security.pairing import PairingAuthority, PairingRequestInfo
 from snowlink.security.secrets import generate_session_id
 from snowlink.stats import SessionStats, StatsSampler
 
+if TYPE_CHECKING:
+    from snowlink.media.audio_models import AudioPlaybackControls
+    from snowlink.media.audio_track import ShareAudioCapture
+    from snowlink.media.screen_capture import ScreenCaptureSession
+
 logger = logging.getLogger(__name__)
 
 ApprovalHandler = Callable[[PairingRequestInfo], Awaitable[bool]]
+
+
+def _validate_local_ip(ip: str, adapters: list[NetworkAdapter]) -> None:
+    """Validate a native bind address without importing the legacy RTC engine."""
+    try:
+        validate_ipv4(ip, kind="local")
+        resolve_local_endpoint(adapters, ip)
+    except ValueError as exc:
+        if ip == "127.0.0.1":
+            return
+        raise WebRTCError(
+            failure_for("INVALID_BIND_IP", f"IPv4 address is not locally assigned: {ip}")
+        ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +188,24 @@ class ScreenSessionState:
 StateCallback = Callable[[ScreenSessionState], None]
 
 
+def _native_candidate_summary(sdp: str) -> list[str]:
+    """Return safe, compact ICE candidate diagnostics without logging SDP."""
+    summaries: list[str] = []
+    for raw_line in sdp.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("a=candidate:"):
+            continue
+        fields = line.split()
+        if len(fields) < 8:
+            summaries.append("malformed-candidate")
+            continue
+        candidate_type = fields[fields.index("typ") + 1] if "typ" in fields else "unknown"
+        summaries.append(
+            f"{fields[2].lower()} {fields[4]}:{fields[5]} typ={candidate_type}"
+        )
+    return summaries
+
+
 def _native_session_stats(engine: Any, *, width: int, height: int) -> SessionStats:
     raw = engine.get_stats()
     return SessionStats(
@@ -210,7 +232,7 @@ async def run_native_screen_share(
     from snowlink.native_engine import NativeEngine
 
     adapters = _load_adapters()
-    validate_local_ip(config.bind_ip, adapters)
+    _validate_local_ip(config.bind_ip, adapters)
     stop = stop_event or asyncio.Event()
     pairing = (
         PairingAuthority(session_id=generate_session_id(), code=config.pairing_code)
@@ -227,6 +249,20 @@ async def run_native_screen_share(
     )
     _notify(on_state, state)
     engine = NativeEngine.create()
+    logger.info(
+        "Native share starting: bind=%s signaling_port=%d monitor=%d backend=%s "
+        "size=%dx%d fps=%d bitrate=%d media_udp=%d-%d",
+        config.bind_ip,
+        config.signaling_port,
+        config.monitor,
+        config.backend,
+        config.width,
+        config.height,
+        config.fps,
+        config.bitrate_bps,
+        NATIVE_MEDIA_PORT_MIN,
+        NATIVE_MEDIA_PORT_MAX,
+    )
     server: WsSignalingServer | None = None
     backend_id = {"automatic": -1, "dxgi": 0, "winrt": 1}[config.backend]
 
@@ -250,6 +286,10 @@ async def run_native_screen_share(
         while time.monotonic() < deadline and not stop.is_set():
             offer = engine.local_description()
             if offer is not None:
+                logger.info(
+                    "Native offer gathered: candidates=%s",
+                    _native_candidate_summary(offer["sdp"]),
+                )
                 return offer
             await asyncio.sleep(0.02)
         raise TimeoutError("Native ICE gathering timed out")
@@ -295,8 +335,15 @@ async def run_native_screen_share(
             except TimeoutError:
                 continue
         if answer is not None:
+            logger.info(
+                "Native answer received: candidates=%s",
+                _native_candidate_summary(answer["sdp"]),
+            )
             engine.set_remote_description(sdp=answer["sdp"], sdp_type=answer["type"])
             connect_deadline = time.monotonic() + config.timeouts.ice_connection_s
+            connect_started = time.monotonic()
+            last_connect_log = 0.0
+            last_connect_error = ""
             while True:
                 try:
                     engine.start_stream(
@@ -305,11 +352,29 @@ async def run_native_screen_share(
                         target_fps=config.fps,
                         bitrate_bps=config.bitrate_bps,
                     )
+                    logger.info(
+                        "Native media connected after %.2fs",
+                        time.monotonic() - connect_started,
+                    )
                     break
                 except Exception as exc:
-                    if time.monotonic() >= connect_deadline:
+                    now = time.monotonic()
+                    last_connect_error = str(exc)
+                    if now - last_connect_log >= 1.0:
+                        native_stats = engine.get_stats()
+                        logger.info(
+                            "Waiting for native media: elapsed=%.1fs transport_errors=%d "
+                            "packets_sent=%d last_error=%s",
+                            now - connect_started,
+                            native_stats.transport_errors,
+                            native_stats.packets_sent,
+                            last_connect_error,
+                        )
+                        last_connect_log = now
+                    if now >= connect_deadline:
                         raise RuntimeError(
-                            "Native media transport did not connect in time"
+                            "Native media transport did not connect in time. "
+                            f"Debug log: {log_file_path()}"
                         ) from exc
                     await asyncio.sleep(0.1)
             state.phase = "sharing"
@@ -337,6 +402,7 @@ async def run_native_screen_share(
         state.detail = "Sharing stopped"
         _notify(on_state, state)
     except Exception as exc:
+        logger.exception("Native share failed: %s", exc)
         state.phase = "failed"
         state.sharing_active = False
         state.error = str(exc)
@@ -379,6 +445,15 @@ async def run_native_screen_view(
     _notify(on_state, state)
     client: WsSignalingClient | None = None
     engine = NativeEngine.create()
+    logger.info(
+        "Native view starting: remote=%s:%d source_ip=%s hwnd=%d media_udp=%d-%d",
+        config.remote_ip,
+        config.signaling_port,
+        config.requested_source_ip or "automatic",
+        hwnd,
+        NATIVE_MEDIA_PORT_MIN,
+        NATIVE_MEDIA_PORT_MAX,
+    )
     if on_engine is not None:
         on_engine(engine)
     try:
@@ -399,6 +474,10 @@ async def run_native_screen_view(
         state.detail = "Paired; negotiating native H.264 receiver"
         _notify(on_state, state)
         offer = await asyncio.wait_for(client.wait_offer(), timeout=config.timeouts.offer_answer_s)
+        logger.info(
+            "Native offer received: candidates=%s",
+            _native_candidate_summary(offer["sdp"]),
+        )
         engine.set_remote_description(sdp=offer["sdp"], sdp_type=offer["type"])
         engine.create_receiver_answer()
         deadline = time.perf_counter() + config.timeouts.ice_gathering_s
@@ -409,14 +488,24 @@ async def run_native_screen_view(
                 await asyncio.sleep(0.02)
         if answer is None:
             raise TimeoutError("native ICE gathering timed out")
+        logger.info(
+            "Native answer gathered: candidates=%s",
+            _native_candidate_summary(answer["sdp"]),
+        )
         await client.send_answer(sdp=answer["sdp"], sdp_type=answer["type"])
         state.phase = "viewing"
         state.detail = "Receiving remote screen (native GPU video)"
         _notify(on_state, state)
+        logger.info("Native viewer media loop entered")
+        next_view_log = time.monotonic()
         while not stop.is_set():
+            poll_started = time.monotonic()
             decoder = engine.decoder_status()
+            decoder_poll_ms = (time.monotonic() - poll_started) * 1000.0
             size = (int(decoder["decoded_width"]), int(decoder["decoded_height"]))
+            stats_started = time.monotonic()
             raw_stats = engine.get_stats()
+            stats_poll_ms = (time.monotonic() - stats_started) * 1000.0
             state.frames = raw_stats.frames_decoded
             state.stats = SessionStats(
                 render_fps=raw_stats.render_fps or raw_stats.decode_fps,
@@ -432,6 +521,25 @@ async def run_native_screen_view(
                     f"Native {decoder['decoder_name']} — {size[0]}×{size[1]} "
                     f"@ {decoder['decode_fps']:.1f} fps"
                 )
+            now = time.monotonic()
+            if now >= next_view_log:
+                logger.info(
+                    "Native viewer heartbeat: decoded=%d decode_fps=%.1f render_fps=%.1f "
+                    "drops=%d transport_errors=%d rtt_ms=%.1f decoder_poll_ms=%.2f "
+                    "stats_poll_ms=%.2f decoder=%s size=%dx%d",
+                    raw_stats.frames_decoded,
+                    raw_stats.decode_fps,
+                    raw_stats.render_fps,
+                    raw_stats.frames_dropped,
+                    raw_stats.transport_errors,
+                    raw_stats.network_rtt_ms,
+                    decoder_poll_ms,
+                    stats_poll_ms,
+                    decoder["decoder_name"] or "unavailable",
+                    size[0],
+                    size[1],
+                )
+                next_view_log = now + 5.0
             _notify(on_state, state)
             try:
                 await asyncio.wait_for(stop.wait(), timeout=1.0)
@@ -440,6 +548,7 @@ async def run_native_screen_view(
         state.phase = "stopped"
         state.detail = "View stopped"
     except Exception as exc:
+        logger.exception("Native view failed: %s", exc)
         state.phase = "failed"
         state.error = str(exc)
         state.detail = str(exc)
@@ -513,6 +622,23 @@ async def run_screen_share(
     audio_capture: ShareAudioCapture | None = None,
 ) -> ScreenSessionState:
     """Bind WS signaling, start DXcam (+ optional loopback), offer after pairing."""
+    from snowlink.media.audio_track import LoopbackAudioTrack, ShareAudioCapture
+    from snowlink.media.screen_capture import ScreenCaptureSession
+    from snowlink.media.video_track import ScreenVideoTrack
+    from snowlink.rtc.ice_policy import apply_ice_policy_to_local_description
+    from snowlink.rtc.peer_connection import (
+        assert_opus_available,
+        assert_preferred_video_codec_available,
+        create_peer_connection,
+        prefer_audio_codec,
+        prefer_video_codec,
+        preferred_host_ip_of,
+        require_aiortc,
+        wait_ice_connected,
+        wait_ice_gathering_complete,
+    )
+    from snowlink.rtc.session import validate_local_ip
+
     require_aiortc()
     from aiortc import RTCSessionDescription
 
@@ -868,6 +994,23 @@ async def run_screen_view(
     preview_window_name: str = "Snowlink View",
 ) -> ScreenSessionState:
     """Connect to a sharer, pair, receive screen video (+ optional system audio)."""
+    from snowlink.media.audio_track import AudioPlaybackControls
+    from snowlink.rtc.audio_receiver import PlaybackWorker, RemoteAudioConsumer
+    from snowlink.rtc.av_sync import AvSyncController
+    from snowlink.rtc.ice_policy import apply_ice_policy_to_local_description
+    from snowlink.rtc.peer_connection import (
+        assert_opus_available,
+        create_peer_connection,
+        prefer_audio_codec,
+        prefer_video_codec,
+        preferred_host_ip_of,
+        require_aiortc,
+        wait_ice_connected,
+        wait_ice_gathering_complete,
+    )
+    from snowlink.rtc.preview import RemoteVideoConsumer, run_preview_loop
+    from snowlink.rtc.session import validate_local_ip
+
     require_aiortc()
     from aiortc import RTCSessionDescription
 

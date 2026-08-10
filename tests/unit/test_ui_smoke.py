@@ -116,3 +116,75 @@ def test_incoming_connection_dialog_and_session_windows() -> None:
     assert callable(prompt_incoming_connection)
     share_win.deleteLater()
     view_win.deleteLater()
+
+
+def test_native_view_commands_never_run_on_qt_thread_and_mouse_moves_coalesce() -> None:
+    from snowlink.config import UserPreferences
+    from snowlink.ui.pages.view import ViewPage
+
+    _ensure_qapp()
+
+    class Engine:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def receiver_set_visible(self, visible: bool) -> None:
+            self.calls.append(("visible", visible))
+
+        def receiver_resize(self) -> None:
+            self.calls.append(("resize",))
+
+        def decoder_status(self) -> dict[str, int]:
+            self.calls.append(("decoder_status",))
+            return {"decoded_width": 1920, "decoded_height": 1080}
+
+        def send_input(self, **event) -> None:
+            self.calls.append(("input", event))
+
+    class Dispatcher:
+        def __init__(self) -> None:
+            self.callbacks: list = []
+
+        def dispatch(self, callback) -> bool:
+            self.callbacks.append(callback)
+            return True
+
+    page = ViewPage(UserPreferences())
+    engine = Engine()
+    dispatcher = Dispatcher()
+    page._native_engine = engine  # noqa: SLF001
+    page._session = dispatcher  # type: ignore[assignment]  # noqa: SLF001
+
+    page.native_surface_changed(True)
+    for x in range(100):
+        page.native_input_event({"kind": 1, "x": x, "y": 50, "width": 960, "height": 540})
+
+    # No DLL-facing method executes synchronously from the Qt handlers.
+    assert engine.calls == []
+    assert len(dispatcher.callbacks) == 2  # one surface update + one coalesced mouse update
+
+    for callback in dispatcher.callbacks:
+        callback()
+    assert engine.calls[:2] == [("visible", True), ("resize",)]
+    assert engine.calls[2] == ("decoder_status",)
+    assert engine.calls[3][0] == "input"
+    # The newest mouse event wins; x=99 maps to source x=198.
+    assert engine.calls[3][1]["x"] == 198
+    page.deleteLater()
+
+
+def test_native_fullscreen_preserves_video_hwnd() -> None:
+    from snowlink.ui.windows import ViewSessionWindow
+
+    _ensure_qapp()
+    window = ViewSessionWindow()
+    window.show()
+    hwnd = window.native_video_handle
+    window._toggle_fullscreen()  # noqa: SLF001
+    assert window.isFullScreen()
+    assert window.native_video_handle == hwnd
+    window._toggle_fullscreen()  # noqa: SLF001
+    assert not window.isFullScreen()
+    assert window.native_video_handle == hwnd
+    window.close()
+    window.deleteLater()

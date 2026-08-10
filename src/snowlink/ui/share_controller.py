@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 from PySide6.QtCore import QObject, Signal
@@ -77,6 +78,8 @@ class ShareController(QObject):
         media_backend = str(
             getattr(prefs, "media_backend", "native_cpp") if prefs else "native_cpp"
         )
+        if getattr(sys, "frozen", False):
+            media_backend = "native_cpp"
         target_fps = int(getattr(prefs, "target_fps", 30) if prefs else 30)
         bitrate_bps = int(getattr(prefs, "bitrate_bps", 2_500_000) if prefs else 2_500_000)
         remote_control = bool(getattr(prefs, "remote_control_enabled", True) if prefs else True)

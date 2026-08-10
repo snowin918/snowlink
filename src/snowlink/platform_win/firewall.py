@@ -8,11 +8,14 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
+from snowlink.constants import NATIVE_MEDIA_PORT_MAX, NATIVE_MEDIA_PORT_MIN
+
 logger = logging.getLogger(__name__)
 
 FIREWALL_SETUP_HINT = (
     "Allow Snowlink through Windows Firewall when prompted on first listen, "
-    "or add an inbound rule for the executable (TCP signaling port and UDP for WebRTC). "
+    f"or add an inbound rule for the executable (TCP signaling and UDP "
+    f"{NATIVE_MEDIA_PORT_MIN}-{NATIVE_MEDIA_PORT_MAX} for native WebRTC). "
     "See docs/vpn-lan-access.md if a VPN kill-switch blocks LAN."
 )
 

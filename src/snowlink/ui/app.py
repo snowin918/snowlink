@@ -78,21 +78,6 @@ def _install_exception_hooks(app: QApplication) -> None:
     _ = app  # app kept for future thread hooks
 
 
-def _check_vcredist_hint() -> None:
-    """Show a soft hint when common native deps fail to import (missing VC++)."""
-    try:
-        import av  # noqa: F401
-    except Exception as exc:  # noqa: BLE001
-        QMessageBox.warning(
-            None,
-            "Missing runtime?",
-            "PyAV failed to import. On a clean Windows PC this often means the "
-            "Microsoft Visual C++ Redistributable is missing.\n\n"
-            f"Detail: {exc}\n\n"
-            "Install the latest VC++ x64 redistributable, then relaunch Snowlink.",
-        )
-
-
 def run_app(argv: list[str] | None = None) -> int:
     """Create the Qt application and show the main window."""
     _redirect_frozen_stdio()
@@ -118,7 +103,6 @@ def run_app(argv: list[str] | None = None) -> int:
 
     app.aboutToQuit.connect(_on_about_to_quit)
 
-    _check_vcredist_hint()
 
     window = MainWindow()
     window.show()

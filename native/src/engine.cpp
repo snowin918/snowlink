@@ -208,8 +208,8 @@ void SnowlinkEngine::transport_access_unit(void* context,const std::uint8_t* dat
 }
 void SnowlinkEngine::transport_cursor_message(void* context,const std::uint8_t*data,std::size_t size){if(!context)return;CursorState s;CursorShape shape;if(decode_cursor_message(data,size,&s,&shape)){auto*self=static_cast<SnowlinkEngine*>(context);if(size>1&&data[1]==1)self->cursor_->receive_state(s);else self->cursor_->receive_shape(shape);}}
 void SnowlinkEngine::transport_input_message(void* context,const std::uint8_t*data,std::size_t size){if(!context)return;RemoteInputEvent event;if(decode_input_event(data,size,event))static_cast<SnowlinkEngine*>(context)->input_->inject(event);}
-void SnowlinkEngine::receive_loop(){while(!stop_receive_requested_){EncodedFrame frame;{std::unique_lock lock(receive_mutex_);receive_wake_.wait(lock,[&]{return stop_receive_requested_||!receive_queue_.empty();});if(stop_receive_requested_)break;frame=std::move(receive_queue_.back());receive_queue_.clear();}
-    if(awaiting_keyframe_&&!frame.keyframe)continue;ID3D11Texture2D* texture=nullptr;int32_t result=decoder_->decode(frame,&texture);
+void SnowlinkEngine::receive_loop(){auto last_keyframe_request=std::chrono::steady_clock::time_point{};while(!stop_receive_requested_){EncodedFrame frame;{std::unique_lock lock(receive_mutex_);receive_wake_.wait(lock,[&]{return stop_receive_requested_||!receive_queue_.empty();});if(stop_receive_requested_)break;frame=std::move(receive_queue_.back());receive_queue_.clear();}
+    if(awaiting_keyframe_&&!frame.keyframe){const auto now=std::chrono::steady_clock::now();if(last_keyframe_request.time_since_epoch().count()==0||now-last_keyframe_request>=std::chrono::milliseconds(500)){transport_->request_remote_keyframe();last_keyframe_request=now;}std::lock_guard lock(stats_mutex_);++stats_.frames_dropped;continue;}ID3D11Texture2D* texture=nullptr;int32_t result=decoder_->decode(frame,&texture);
     if(result<0){awaiting_keyframe_=true;decoder_->reset();transport_->request_remote_keyframe();std::lock_guard lock(stats_mutex_);++stats_.frames_dropped;continue;}
     if(frame.keyframe)awaiting_keyframe_=false;if(texture){D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);cursor_->update_source_size(d.Width,d.Height);renderer_->submit(texture,++receive_frame_id_);texture->Release();std::lock_guard lock(stats_mutex_);++stats_.frames_decoded;}
 }}
@@ -289,12 +289,16 @@ void SnowlinkEngine::stream_loop(StreamConfig config) {
     std::uint64_t last_id = 0;
     bool encoder_ready = false;
     const auto epoch = std::chrono::steady_clock::now();
+    auto rate_mark = epoch;
+    std::uint64_t rate_capture_frames = 0;
+    std::uint64_t rate_encoded_frames = 0;
     const auto frame_interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(1.0 / static_cast<double>(config.target_fps)));
     auto next_submit = epoch;
-    auto publish_frames = [this](std::vector<EncodedFrame>& frames) {
+    auto publish_frames = [this, &rate_encoded_frames](std::vector<EncodedFrame>& frames) {
         for (auto& frame : frames) {
             if (transport_->enqueue(std::move(frame)) == 0) {
+                ++rate_encoded_frames;
                 std::lock_guard lock(stats_mutex_); ++stats_.frames_encoded;
             }
         }
@@ -330,6 +334,7 @@ void SnowlinkEngine::stream_loop(StreamConfig config) {
             continue;
         }
         last_id = frame_id;
+        ++rate_capture_frames;
         // Preserve cadence across ordinary Windows timer overshoot instead of
         // scheduling from a late wake and accumulating that lateness forever.
         // If the desktop was static for a whole interval, reset once rather
@@ -377,6 +382,16 @@ void SnowlinkEngine::stream_loop(StreamConfig config) {
         if (result < 0) {
             std::lock_guard lock(stats_mutex_);
             ++stats_.frames_dropped;
+        }
+        const auto rate_now = std::chrono::steady_clock::now();
+        const double rate_seconds = std::chrono::duration<double>(rate_now - rate_mark).count();
+        if (rate_seconds >= 0.5) {
+            std::lock_guard lock(stats_mutex_);
+            stats_.capture_fps = static_cast<double>(rate_capture_frames) / rate_seconds;
+            stats_.encode_fps = static_cast<double>(rate_encoded_frames) / rate_seconds;
+            rate_capture_frames = 0;
+            rate_encoded_frames = 0;
+            rate_mark = rate_now;
         }
     }
 }

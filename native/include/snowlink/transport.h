@@ -11,8 +11,8 @@ namespace snowlink {
 
 struct TransportConfig {
     std::string bind_address;
-    std::uint16_t port_min = 1024;
-    std::uint16_t port_max = 65535;
+    std::uint16_t port_min = 40000;
+    std::uint16_t port_max = 40100;
     std::size_t mtu = 1200;
     std::size_t frame_queue_limit = 2;
     std::size_t nack_packet_limit = 256;

@@ -140,6 +140,17 @@ class AsyncioSessionWorker(QObject):
         except RuntimeError:
             pass
 
+    def dispatch(self, callback: Callable[[], None]) -> bool:
+        """Run a native/control callback on the session thread, never Qt's thread."""
+        loop = self._loop
+        if loop is None or not self._running:
+            return False
+        try:
+            loop.call_soon_threadsafe(callback)
+            return True
+        except RuntimeError:
+            return False
+
     def respond_approval(self, approved: bool) -> None:
         """Resolve a pending pairing approval from the Qt thread."""
         loop = self._loop

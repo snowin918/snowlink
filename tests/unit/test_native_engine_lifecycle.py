@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from snowlink.constants import NATIVE_MEDIA_PORT_MAX, NATIVE_MEDIA_PORT_MIN
 from snowlink.native_engine import (
     NativeEngine,
     NativeEngineError,
@@ -45,7 +46,7 @@ def test_native_engine_context_manager() -> None:
 
 def test_native_transport_control_plane() -> None:
     with NativeEngine.create() as engine:
-        engine.connect(bind_address="127.0.0.1", port_min=40000, port_max=40100)
+        engine.connect(bind_address="127.0.0.1")
         engine.create_offer()
         # ICE gathering is asynchronous; Python polls SDP but never handles frames.
         description = None
@@ -58,8 +59,33 @@ def test_native_transport_control_plane() -> None:
         assert description["type"] == "offer"
         assert "m=video" in description["sdp"]
         assert "H264/90000" in description["sdp"]
+        assert "a=candidate:" in description["sdp"]
+        candidate = next(
+            line for line in description["sdp"].splitlines() if line.startswith("a=candidate:")
+        )
+        candidate_port = int(candidate.split()[5])
+        assert NATIVE_MEDIA_PORT_MIN <= candidate_port <= NATIVE_MEDIA_PORT_MAX
         with pytest.raises(NativeEngineError):
             engine.start_stream()
+
+
+def test_native_candidate_summary_excludes_credentials_and_sdp() -> None:
+    from snowlink.rtc.screen_session import _native_candidate_summary
+
+    sdp = "\r\n".join(
+        (
+            "v=0",
+            "a=ice-ufrag:secret-value",
+            "a=candidate:1 1 UDP 2114977791 192.168.1.20 40001 typ host",
+            "a=candidate:2 1 TCP 1234 192.168.1.20 9 typ host tcptype active",
+        )
+    )
+    summary = _native_candidate_summary(sdp)
+    assert summary == [
+        "udp 192.168.1.20:40001 typ=host",
+        "tcp 192.168.1.20:9 typ=host",
+    ]
+    assert "secret-value" not in repr(summary)
 
 
 def test_probe_native_engine() -> None:

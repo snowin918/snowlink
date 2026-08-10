@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+import sys
+import threading
+from typing import Any, cast
 
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QImage
@@ -18,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from snowlink.media.audio_track import AudioPlaybackControls
+from snowlink.media.audio_models import AudioPlaybackControls
 from snowlink.ui.widgets.collapsible import wrap_in_scroll
 from snowlink.ui.widgets.stats_panel import StatsPanel
 from snowlink.ui.workers import AsyncioSessionWorker
@@ -47,6 +49,9 @@ class ViewPage(QWidget):
         self._preferences = preferences
         self._native_surface_handle = 0
         self._native_engine: Any | None = None
+        self._native_mouse_lock = threading.Lock()
+        self._native_mouse_pending: dict[str, Any] | None = None
+        self._native_mouse_scheduled = False
         self._audio_controls = AudioPlaybackControls(muted=False, gain=1.0)
         self._session = AsyncioSessionWorker(self)
         self._session.state_changed.connect(self._on_session_state)
@@ -136,32 +141,74 @@ class ViewPage(QWidget):
         engine = self._native_engine
         if engine is None:
             return
-        try:
-            engine.receiver_set_visible(visible)
-            if visible:
-                engine.receiver_resize()
-        except Exception:
-            pass
+        active_engine: Any = cast(Any, engine)
+
+        def apply_surface_change() -> None:
+            if active_engine is not self._native_engine:
+                return
+            assert active_engine is not None
+            try:
+                active_engine.receiver_set_visible(visible)
+                if visible:
+                    active_engine.receiver_resize()
+            except Exception:
+                pass
+
+        self._session.dispatch(apply_surface_change)
 
     def native_input_event(self, event: dict[str, Any]) -> None:
         engine = self._native_engine
         if engine is None:
             return
+        active_engine: Any = cast(Any, engine)
+
+        # Mouse tracking can produce hundreds of moves per second. Keep only
+        # the newest move while one worker callback is queued so neither Qt nor
+        # the asyncio control loop develops an unbounded event backlog.
+        if event.get("kind") == 1:
+            with self._native_mouse_lock:
+                self._native_mouse_pending = dict(event)
+                if self._native_mouse_scheduled:
+                    return
+                self._native_mouse_scheduled = True
+            if not self._session.dispatch(self._drain_native_mouse):
+                with self._native_mouse_lock:
+                    self._native_mouse_scheduled = False
+            return
+
+        payload = dict(event)
+
+        def send_discrete_input() -> None:
+            if active_engine is not self._native_engine:
+                return
+            assert active_engine is not None
+            try:
+                active_engine.send_input(**payload)
+            except Exception:
+                pass
+
+        self._session.dispatch(send_discrete_input)
+
+    def _drain_native_mouse(self) -> None:
+        with self._native_mouse_lock:
+            event = self._native_mouse_pending
+            self._native_mouse_pending = None
+            self._native_mouse_scheduled = False
+        engine = self._native_engine
+        if engine is None or event is None:
+            return
         try:
-            if event.get("kind") == 1:
-                status = engine.decoder_status()
-                sw = int(status["decoded_width"])
-                sh = int(status["decoded_height"])
-                dw = max(1, int(event["width"]))
-                dh = max(1, int(event["height"]))
-                scale = min(dw / sw, dh / sh) if sw and sh else 1.0
-                ox = (dw - sw * scale) / 2
-                oy = (dh - sh * scale) / 2
-                x = max(0, min(sw - 1, int((event["x"] - ox) / scale)))
-                y = max(0, min(sh - 1, int((event["y"] - oy) / scale)))
-                engine.send_input(kind=1, x=x, y=y)
-            else:
-                engine.send_input(**event)
+            status = engine.decoder_status()
+            sw = int(status["decoded_width"])
+            sh = int(status["decoded_height"])
+            dw = max(1, int(event["width"]))
+            dh = max(1, int(event["height"]))
+            scale = min(dw / sw, dh / sh) if sw and sh else 1.0
+            ox = (dw - sw * scale) / 2
+            oy = (dh - sh * scale) / 2
+            x = max(0, min(sw - 1, int((event["x"] - ox) / scale)))
+            y = max(0, min(sh - 1, int((event["y"] - oy) / scale)))
+            engine.send_input(kind=1, x=x, y=y)
         except Exception:
             pass
 
@@ -170,6 +217,8 @@ class ViewPage(QWidget):
             QMessageBox.warning(self, "Busy", "Already connected or connecting.")
             return
         media_backend = str(getattr(self._preferences, "media_backend", "native_cpp"))
+        if getattr(sys, "frozen", False):
+            media_backend = "native_cpp"
         if media_backend == "native_cpp":
             self.native_surface_requested.emit()
         remote_ip = self._ip.text().strip()
@@ -254,6 +303,9 @@ class ViewPage(QWidget):
 
     def _on_session_finished(self, _state: Any) -> None:
         self._native_engine = None
+        with self._native_mouse_lock:
+            self._native_mouse_pending = None
+            self._native_mouse_scheduled = False
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
         self._stats.clear()
@@ -262,6 +314,9 @@ class ViewPage(QWidget):
 
     def _on_session_failed(self, message: str) -> None:
         self._native_engine = None
+        with self._native_mouse_lock:
+            self._native_mouse_pending = None
+            self._native_mouse_scheduled = False
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
         self._stats.clear()

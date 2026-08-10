@@ -28,6 +28,7 @@ from snowlink.media.audio_models import (
     TARGET_CHANNELS,
     TARGET_SAMPLE_RATE,
 )
+from snowlink.media.audio_models import AudioPlaybackControls as AudioPlaybackControls
 from snowlink.media.audio_ring_buffer import AudioRingBuffer
 from snowlink.media.loopback_capture import LoopbackCapture
 from snowlink.platform_win.audio_endpoints import (
@@ -44,14 +45,6 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError("aiortc is required for loopback audio tracks") from exc
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class AudioPlaybackControls:
-    """Mutable viewer playback controls (safe to flip from the UI thread)."""
-
-    muted: bool = False
-    gain: float = 0.25
 
 
 @dataclass(slots=True)

@@ -114,6 +114,7 @@ if (SNOWLINK_BUILD_TRANSPORT_TEST)
     if (MSVC)
         target_compile_options(snowlink_transport_packet_test PRIVATE /W4 /permissive-)
     endif()
+
 endif()
 
 add_executable(snowlink_cursor_input_protocol_test

@@ -33,6 +33,8 @@ def candidate_dll_paths() -> list[Path]:
             native_root / "build" / "bin" / DLL_NAME,
             # Next to frozen executable
             Path(sys.executable).resolve().parent / DLL_NAME,
+            # PyInstaller onedir stores collected binaries in _internal
+            Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)) / DLL_NAME,
             # Optional sidecar beside the Python package
             here.parent / DLL_NAME,
         ]

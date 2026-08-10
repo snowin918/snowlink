@@ -16,15 +16,31 @@ Set-Location $RepoRoot
 
 Write-Host "Repository: $RepoRoot"
 
-$python = Get-Command python -ErrorAction SilentlyContinue
-if (-not $python) {
-    Write-Error "python not found on PATH. Activate the project venv first."
+$VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+if (Test-Path $VenvPython) {
+    $PythonExe = $VenvPython
+} else {
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) {
+        Write-Error "python not found. Create .venv or install Python."
+    }
+    $PythonExe = $python.Source
 }
 
-Write-Host "Python: $(python -c 'import sys; print(sys.executable)')"
+Write-Host "Python: $(& $PythonExe -c 'import sys; print(sys.executable)')"
 
-Write-Host "Ensuring GUI + packaging deps..."
-python -m pip install -e ".[dev,ui]" | Out-Host
+Write-Host "Building native Release engine and runtime dependencies..."
+& powershell -ExecutionPolicy Bypass -File `
+    (Join-Path $RepoRoot "scripts\dev\build_native_engine.ps1") -Config Release
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Native Release build failed ($LASTEXITCODE)"
+}
+
+Write-Host "Checking GUI + packaging dependencies..."
+& $PythonExe -c "import PyInstaller, PySide6, snowlink"
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Missing packaging dependencies. Run: .\.venv\Scripts\python.exe -m pip install -e `".[dev,ui,capture,audio,webrtc]`""
+}
 
 $spec = Join-Path $RepoRoot "packaging\snowlink-gui.spec"
 if (-not (Test-Path $spec)) {
@@ -35,7 +51,7 @@ $dist = Join-Path $RepoRoot "packaging\dist"
 $work = Join-Path $RepoRoot "packaging\build"
 
 Write-Host "Running PyInstaller (windowed onedir)..."
-python -m PyInstaller `
+& $PythonExe -m PyInstaller `
     --noconfirm `
     --clean `
     --distpath $dist `
@@ -51,4 +67,4 @@ Write-Host ""
 Write-Host "Built GUI app folder: $(Join-Path $dist 'Snowlink')"
 Write-Host "Launch: $exe"
 Write-Host "Distribute the whole Snowlink\ folder (onedir), not only the exe."
-Write-Host "LAN Share/View streaming is still Phase 1 (not ready)."
+Write-Host "The folder includes the native media engine. Copy the entire Snowlink folder."

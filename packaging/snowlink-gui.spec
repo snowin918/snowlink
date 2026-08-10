@@ -26,6 +26,16 @@ datas: list = [
     (str(ROOT / "logo"), "logo"),
 ]
 binaries: list = []
+native_bin = ROOT / "native" / "build" / "bin" / "Release"
+native_engine = native_bin / "snowlink_engine.dll"
+if not native_engine.is_file():
+    raise FileNotFoundError(
+        f"Native Release engine not found: {native_engine}. "
+        "Run scripts/dev/build_native_engine.ps1 -Config Release first."
+    )
+# Keep the engine and its copied OpenSSL runtime dependencies together in the
+# PyInstaller runtime directory. libdatachannel and SRTP are linked statically.
+binaries += [(str(path), ".") for path in sorted(native_bin.glob("*.dll"))]
 hiddenimports: list = [
     "snowlink",
     "snowlink.ui",

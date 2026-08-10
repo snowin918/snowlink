@@ -22,6 +22,35 @@ public:
     std::uint64_t rate_frames = 0;
 };
 
+namespace {
+
+HRESULT find_h264_decoder(IMFActivate*** activations, UINT* count, bool& hardware) {
+    MFT_REGISTER_TYPE_INFO input{MFMediaType_Video, MFVideoFormat_H264};
+    hardware = true;
+    HRESULT hr = MFTEnumEx(
+        MFT_CATEGORY_VIDEO_DECODER,
+        MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+        &input, nullptr, activations, count);
+    if (SUCCEEDED(hr) && *count != 0) return S_OK;
+    if (*activations) {
+        CoTaskMemFree(*activations);
+        *activations = nullptr;
+    }
+    *count = 0;
+
+    // The Microsoft H.264 decoder is normally registered as a synchronous MFT,
+    // even when it performs DXVA decoding into D3D11 surfaces.  Restricting the
+    // search to MFT_ENUM_FLAG_HARDWARE therefore rejects valid decoder setups.
+    hardware = false;
+    return MFTEnumEx(
+        MFT_CATEGORY_VIDEO_DECODER,
+        MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT |
+            MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+        &input, nullptr, activations, count);
+}
+
+} // namespace
+
 H264HardwareDecoder::H264HardwareDecoder() : state_(std::make_unique<State>()) {}
 H264HardwareDecoder::~H264HardwareDecoder() { shutdown(); }
 
@@ -36,11 +65,9 @@ int32_t H264HardwareDecoder::initialize(ID3D11Device* device) {
     if (FAILED(hr = MFCreateDXGIDeviceManager(&state_->reset_token, &state_->manager)) ||
         FAILED(hr = state_->manager->ResetDevice(device, state_->reset_token))) return hr;
 
-    MFT_REGISTER_TYPE_INFO input{MFMediaType_Video, MFVideoFormat_H264};
     IMFActivate** activations = nullptr; UINT count = 0;
-    hr = MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER,
-        MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
-        &input, nullptr, &activations, &count);
+    bool hardware = false;
+    hr = find_h264_decoder(&activations, &count, hardware);
     if (FAILED(hr) || count == 0) { CoTaskMemFree(activations); return MF_E_TOPO_CODEC_NOT_FOUND; }
     WCHAR* name = nullptr; UINT name_len = 0;
     activations[0]->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &name, &name_len);
@@ -50,7 +77,7 @@ int32_t H264HardwareDecoder::initialize(ID3D11Device* device) {
     hr = activations[0]->ActivateObject(IID_PPV_ARGS(&state_->transform));
     for (UINT i = 0; i < count; ++i) activations[i]->Release(); CoTaskMemFree(activations);
     if (FAILED(hr)) return hr;
-    state_->info.hardware_accelerated = true;
+    state_->info.hardware_accelerated = hardware;
     ComPtr<IMFAttributes> attrs;
     if (SUCCEEDED(state_->transform->GetAttributes(&attrs))) {
         attrs->SetUINT32(MF_LOW_LATENCY, TRUE);

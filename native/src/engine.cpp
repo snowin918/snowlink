@@ -136,7 +136,7 @@ int32_t SnowlinkEngine::start_stream(const StreamConfig& config) {
     const int32_t result = processor_->configure(processor_config);
     if (result != 0) return result;
     stop_stream_requested_ = false;
-    input_->set_authorized(true); // transport is connected and signaling already approved it
+    input_->set_authorized(remote_input_enabled_);
     state_ = EngineState::Streaming;
     stream_thread_ = std::thread([this, config] { stream_loop(config); });
     return 0;
@@ -149,6 +149,12 @@ int32_t SnowlinkEngine::stop_stream() {
     if (encoder_) encoder_->shutdown();
     if (processor_) processor_->reset();
     if (state_ == EngineState::Streaming) state_ = EngineState::Capturing;
+    return 0;
+}
+
+int32_t SnowlinkEngine::set_remote_input_enabled(bool enabled) {
+    remote_input_enabled_ = enabled;
+    if (input_) input_->set_authorized(enabled && state_ == EngineState::Streaming);
     return 0;
 }
 

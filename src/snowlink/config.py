@@ -20,7 +20,7 @@ class UserPreferences:
 
     signaling_port: int = DEFAULT_SIGNALING_PORT
     preset: str = "low"
-    backend: str = "dxgi"
+    backend: str = "automatic"
     enable_audio: bool = True
     preferred_adapter_name: str | None = None
     preferred_bind_ip: str | None = None
@@ -29,7 +29,10 @@ class UserPreferences:
     share_monitor: int = 0
     audio_capture_device: str = "default"
     auto_start_share: bool = True
-    media_engine: str = "legacy_python"
+    media_backend: str = "native_cpp"
+    target_fps: int = 30
+    bitrate_bps: int = 2_500_000
+    remote_control_enabled: bool = True
     window_x: int | None = None
     window_y: int | None = None
     window_width: int = 700
@@ -40,6 +43,9 @@ class UserPreferences:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> UserPreferences:
+        data = dict(data)
+        if "media_backend" not in data and "media_engine" in data:
+            data["media_backend"] = data["media_engine"]
         known = {f.name for f in fields(cls)}
         kwargs: dict[str, Any] = {}
         for key, value in data.items():

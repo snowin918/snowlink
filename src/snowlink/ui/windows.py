@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QCloseEvent, QImage, QPixmap
+from PySide6.QtGui import QCloseEvent, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -28,23 +29,74 @@ class NativeVideoSurface(QWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._legacy_pixmap: QPixmap | None = None
+
+    def setPixmap(self, pixmap: QPixmap) -> None:  # noqa: N802
+        """Paint only legacy Python frames; native rendering never calls this."""
+        self._legacy_pixmap = pixmap
+        self.update()
+
+    def paintEvent(self, event: Any) -> None:  # noqa: N802
+        if self._legacy_pixmap is None:
+            return super().paintEvent(event)
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), Qt.GlobalColor.black)
+        scaled = self._legacy_pixmap.scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        painter.drawPixmap(
+            (self.width() - scaled.width()) // 2, (self.height() - scaled.height()) // 2, scaled
+        )
 
     def mouseMoveEvent(self, event: Any) -> None:  # noqa: N802
-        p=event.position();self.input_event.emit({"kind":1,"x":int(p.x()),"y":int(p.y()),"width":self.width(),"height":self.height()});super().mouseMoveEvent(event)
-    def mousePressEvent(self,event:Any)->None:  # noqa: N802
-        self.setFocus();self._mouse_button(event,True);super().mousePressEvent(event)
-    def mouseReleaseEvent(self,event:Any)->None:  # noqa: N802
-        self._mouse_button(event,False);super().mouseReleaseEvent(event)
-    def _mouse_button(self,event:Any,down:bool)->None:
-        buttons={Qt.MouseButton.LeftButton:1,Qt.MouseButton.RightButton:2,Qt.MouseButton.MiddleButton:3}
-        code=buttons.get(event.button());
-        if code:self.input_event.emit({"kind":2,"code":code,"down":down})
-    def wheelEvent(self,event:Any)->None:  # noqa: N802
-        self.input_event.emit({"kind":3,"delta":event.angleDelta().y()});super().wheelEvent(event)
-    def keyPressEvent(self,event:Any)->None:  # noqa: N802
-        if not event.isAutoRepeat():self.input_event.emit({"kind":4,"code":event.nativeVirtualKey()&255,"down":True});super().keyPressEvent(event)
-    def keyReleaseEvent(self,event:Any)->None:  # noqa: N802
-        if not event.isAutoRepeat():self.input_event.emit({"kind":4,"code":event.nativeVirtualKey()&255,"down":False});super().keyReleaseEvent(event)
+        p = event.position()
+        self.input_event.emit(
+            {
+                "kind": 1,
+                "x": int(p.x()),
+                "y": int(p.y()),
+                "width": self.width(),
+                "height": self.height(),
+            }
+        )
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event: Any) -> None:  # noqa: N802
+        self.setFocus()
+        self._mouse_button(event, True)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: Any) -> None:  # noqa: N802
+        self._mouse_button(event, False)
+        super().mouseReleaseEvent(event)
+
+    def _mouse_button(self, event: Any, down: bool) -> None:
+        buttons = {
+            Qt.MouseButton.LeftButton: 1,
+            Qt.MouseButton.RightButton: 2,
+            Qt.MouseButton.MiddleButton: 3,
+        }
+        code = buttons.get(event.button())
+        if code:
+            self.input_event.emit({"kind": 2, "code": code, "down": down})
+
+    def wheelEvent(self, event: Any) -> None:  # noqa: N802
+        self.input_event.emit({"kind": 3, "delta": event.angleDelta().y()})
+        super().wheelEvent(event)
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802
+        if not event.isAutoRepeat():
+            self.input_event.emit({"kind": 4, "code": event.nativeVirtualKey() & 255, "down": True})
+            super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event: Any) -> None:  # noqa: N802
+        if not event.isAutoRepeat():
+            self.input_event.emit(
+                {"kind": 4, "code": event.nativeVirtualKey() & 255, "down": False}
+            )
+            super().keyReleaseEvent(event)
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -242,11 +294,7 @@ class ViewSessionWindow(QWidget):
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         if self._last_pixmap is not None:
             screen = win.screen()
-            size = (
-                screen.availableGeometry().size()
-                if screen is not None
-                else self._video.size()
-            )
+            size = screen.availableGeometry().size() if screen is not None else self._video.size()
             label.setPixmap(
                 self._last_pixmap.scaled(
                     size,

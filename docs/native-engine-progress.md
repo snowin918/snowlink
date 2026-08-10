@@ -491,6 +491,31 @@ cursors, mixed-DPI monitor transitions, fullscreen, negative-offset monitors,
 and injected keyboard layouts because the automation desktop cannot provide a
 real approved remote-control session.
 
+## Application integration
+
+The PySide6 application now selects `native_cpp` by default and retains
+`legacy_python` as an explicitly isolated development fallback. Share and View
+dispatch at the controller/page boundary: native Share never constructs a
+`ScreenCaptureSession`, `ScreenVideoTrack`, Python frame queue, raw-frame
+callback, or aiortc video encode loop, and native View never emits a per-frame Qt
+signal. Python carries authenticated signaling SDP and polls native status and
+statistics once per second.
+
+The existing UI controls now configure native monitor selection, Automatic/WGC
+(`WinRT`)/DXGI capture, quality resolution, FPS, bitrate, connect/disconnect,
+start/stop, fullscreen surface reparenting, and approved remote-control policy.
+Automatic maps to native `CaptureBackend::Auto`, preferring WGC and falling back
+to DXGI. Active share status distinguishes granted borderless WGC, an active
+Windows capture border after permission denial, and unavailable WGC/DXGI
+fallback; it never claims borderless capture without granted status.
+
+Routine capture/device/network/decoder failures become session failure state at
+the Python boundary. Shutdown signals the session event, then native cleanup
+stops the stream or receiver, capture, transport, and engine before destroying
+its handle. Legacy QImage/QPixmap conversion and Python frame coalescing remain
+only in the `legacy_python` viewer path; UI icons and audio NumPy operations are
+not screen-video frame processing.
+
 ## Next phase
 
-Next phase: integrate native engine as Snowlink's default backend and remove Python hot-path processing.
+Next phase: performance tuning, stability testing, and release readiness.

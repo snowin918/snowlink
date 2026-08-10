@@ -62,8 +62,21 @@ class SettingsPage(QWidget):
         populate_preset_combo(self._preset, current="low")
         form.addRow("Quality", self._preset)
 
+        self._target_fps = QSpinBox()
+        self._target_fps.setRange(1, 120)
+        self._target_fps.setSuffix(" FPS")
+        form.addRow("Frame rate", self._target_fps)
+
+        self._bitrate = QSpinBox()
+        self._bitrate.setRange(250, 100_000)
+        self._bitrate.setSuffix(" kbps")
+        form.addRow("Video bitrate", self._bitrate)
+
         self._enable_audio = QCheckBox("Share / play system audio by default")
         form.addRow("", self._enable_audio)
+
+        self._remote_control = QCheckBox("Allow an approved viewer to control this computer")
+        form.addRow("", self._remote_control)
 
         self._monitor = QComboBox()
         form.addRow("Which screen", self._monitor)
@@ -99,21 +112,24 @@ class SettingsPage(QWidget):
         adv = QGroupBox("Advanced")
         adv_form = QFormLayout(adv)
         self._backend = QComboBox()
-        self._backend.addItems(["dxgi", "winrt"])
+        self._backend.addItem("Automatic", "automatic")
+        self._backend.addItem("WinRT", "winrt")
+        self._backend.addItem("DXGI", "dxgi")
         self._backend.setToolTip(
-            "DXGI (recommended): no yellow capture border; best for portable .exe.\n"
-            "WinRT: may show a Windows yellow border while sharing; needs WinRT "
-            "packages in the build. Snowlink falls back to DXGI if WinRT is unavailable."
+            "Automatic normally prefers WinRT/WGC and falls back to DXGI.\n"
+            "WinRT may show the Windows capture border when borderless permission is denied. "
+            "Snowlink reports the real permission/status while sharing."
         )
         adv_form.addRow("Capture backend", self._backend)
 
-        self._media_engine = QComboBox()
-        self._media_engine.addItems(["legacy_python", "native_cpp"])
-        self._media_engine.setToolTip(
-            "Select the media engine lifetime. "
-            "native_cpp only probes the native DLL lifecycle today; share/view sessions still use legacy_python until the native pipeline is implemented."
+        self._media_backend = QComboBox()
+        self._media_backend.addItems(["native_cpp", "legacy_python"])
+        self._media_backend.setToolTip(
+            "native_cpp keeps video frames, encoding, transport, decoding, "
+            "rendering, cursor and input in C++. "
+            "legacy_python remains isolated as a temporary fallback."
         )
-        adv_form.addRow("Media engine", self._media_engine)
+        adv_form.addRow("Media backend", self._media_backend)
         layout.addWidget(adv)
 
         row = QHBoxLayout()
@@ -165,10 +181,7 @@ class SettingsPage(QWidget):
                     ),
                 )
                 for adapter in adapters:
-                    ipv4s = (
-                        ", ".join(a.address for a in adapter.ipv4_addresses)
-                        or "(no IPv4)"
-                    )
+                    ipv4s = ", ".join(a.address for a in adapter.ipv4_addresses) or "(no IPv4)"
                     cat = (
                         adapter.category.value
                         if hasattr(adapter.category, "value")
@@ -192,10 +205,7 @@ class SettingsPage(QWidget):
             if is_windows():
                 for monitor in enumerate_monitors():
                     primary = " (main)" if monitor.is_primary else ""
-                    label = (
-                        f"{monitor.name} "
-                        f"{monitor.width}×{monitor.height}{primary}"
-                    )
+                    label = f"{monitor.name} {monitor.width}×{monitor.height}{primary}"
                     self._monitor.addItem(label, int(monitor.index))
             else:
                 self._monitor.addItem("Default screen", 0)
@@ -219,9 +229,7 @@ class SettingsPage(QWidget):
                 None,
             )
             for ep in endpoints:
-                if not getattr(ep, "is_loopback", False) or not getattr(
-                    ep, "can_capture", False
-                ):
+                if not getattr(ep, "is_loopback", False) or not getattr(ep, "can_capture", False):
                     continue
                 flags: list[str] = []
                 assoc_idx = getattr(ep, "associated_output_index", None)
@@ -244,8 +252,7 @@ class SettingsPage(QWidget):
             addrs,
             key=lambda a: (
                 0
-                if getattr(a, "is_private", False)
-                and not getattr(a, "is_loopback", False)
+                if getattr(a, "is_private", False) and not getattr(a, "is_loopback", False)
                 else 1,
                 str(a.address),
             ),
@@ -328,15 +335,18 @@ class SettingsPage(QWidget):
         self._auto_start.setChecked(bool(getattr(prefs, "auto_start_share", True)))
         self._port.setValue(int(prefs.signaling_port))
         populate_preset_combo(self._preset, current=str(prefs.preset))
-        bidx = self._backend.findText(prefs.backend)
+        self._target_fps.setValue(int(getattr(prefs, "target_fps", 30)))
+        self._bitrate.setValue(max(250, int(getattr(prefs, "bitrate_bps", 2_500_000)) // 1000))
+        self._remote_control.setChecked(bool(getattr(prefs, "remote_control_enabled", True)))
+        bidx = self._backend.findData(prefs.backend)
         if bidx >= 0:
             self._backend.setCurrentIndex(bidx)
         self._enable_audio.setChecked(bool(prefs.enable_audio))
         self._remote_ip.setText(prefs.last_remote_ip or "")
         self._source_ip.setText(prefs.last_source_ip or "")
-        me_idx = self._media_engine.findText(prefs.media_engine)
+        me_idx = self._media_backend.findText(prefs.media_backend)
         if me_idx >= 0:
-            self._media_engine.setCurrentIndex(me_idx)
+            self._media_backend.setCurrentIndex(me_idx)
         for i in range(self._monitor.count()):
             if self._monitor.itemData(i) == int(prefs.share_monitor):
                 self._monitor.setCurrentIndex(i)
@@ -360,7 +370,7 @@ class SettingsPage(QWidget):
         return UserPreferences(
             signaling_port=int(self._port.value()),
             preset=preset_from_combo(self._preset),
-            backend=self._backend.currentText(),
+            backend=str(self._backend.currentData()),
             enable_audio=self._enable_audio.isChecked(),
             preferred_adapter_name=adapter_name,
             preferred_bind_ip=str(bind) if bind else None,
@@ -369,7 +379,10 @@ class SettingsPage(QWidget):
             share_monitor=int(mon) if mon is not None else 0,
             audio_capture_device=str(audio),
             auto_start_share=self._auto_start.isChecked(),
-            media_engine=self._media_engine.currentText(),
+            media_backend=self._media_backend.currentText(),
+            target_fps=int(self._target_fps.value()),
+            bitrate_bps=int(self._bitrate.value()) * 1000,
+            remote_control_enabled=self._remote_control.isChecked(),
             window_x=self._prefs.window_x,
             window_y=self._prefs.window_y,
             window_width=self._prefs.window_width,

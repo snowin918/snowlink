@@ -57,8 +57,19 @@ class _TransportConfig(ctypes.Structure):
         ("frame_queue_limit", ctypes.c_uint32),
         ("nack_packet_limit", ctypes.c_uint32),
     ]
+
+
 class _InputEvent(ctypes.Structure):
-    _fields_ = [("kind",ctypes.c_uint8),("code",ctypes.c_uint8),("down",ctypes.c_uint8),("reserved",ctypes.c_uint8),("x",ctypes.c_int32),("y",ctypes.c_int32),("delta",ctypes.c_int32),("sequence",ctypes.c_uint64)]
+    _fields_ = [
+        ("kind", ctypes.c_uint8),
+        ("code", ctypes.c_uint8),
+        ("down", ctypes.c_uint8),
+        ("reserved", ctypes.c_uint8),
+        ("x", ctypes.c_int32),
+        ("y", ctypes.c_int32),
+        ("delta", ctypes.c_int32),
+        ("sequence", ctypes.c_uint64),
+    ]
 
 
 class _EngineStats(ctypes.Structure):
@@ -148,7 +159,8 @@ def _bind(dll: ctypes.CDLL) -> None:
 
     dll.snowlink_engine_connect_transport.restype = ctypes.c_int32
     dll.snowlink_engine_connect_transport.argtypes = [
-        ctypes.c_void_p, ctypes.POINTER(_TransportConfig)
+        ctypes.c_void_p,
+        ctypes.POINTER(_TransportConfig),
     ]
     dll.snowlink_engine_create_transport_offer.restype = ctypes.c_int32
     dll.snowlink_engine_create_transport_offer.argtypes = [ctypes.c_void_p]
@@ -158,22 +170,44 @@ def _bind(dll: ctypes.CDLL) -> None:
         fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
     dll.snowlink_engine_set_remote_sdp.restype = ctypes.c_int32
     dll.snowlink_engine_set_remote_sdp.argtypes = [
-        ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
     ]
     dll.snowlink_engine_start_receiver.restype = ctypes.c_int32
-    dll.snowlink_engine_start_receiver.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.POINTER(_TransportConfig)]
-    for name in ("snowlink_engine_create_receiver_answer", "snowlink_engine_stop_receiver", "snowlink_engine_receiver_resize"):
+    dll.snowlink_engine_start_receiver.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+        ctypes.POINTER(_TransportConfig),
+    ]
+    for name in (
+        "snowlink_engine_create_receiver_answer",
+        "snowlink_engine_stop_receiver",
+        "snowlink_engine_receiver_resize",
+    ):
         fn = getattr(dll, name)
         fn.restype = ctypes.c_int32
         fn.argtypes = [ctypes.c_void_p]
     dll.snowlink_engine_receiver_set_visible.restype = ctypes.c_int32
     dll.snowlink_engine_receiver_set_visible.argtypes = [ctypes.c_void_p, ctypes.c_int32]
-    dll.snowlink_engine_send_input.restype=ctypes.c_int32
-    dll.snowlink_engine_send_input.argtypes=[ctypes.c_void_p,ctypes.POINTER(_InputEvent)]
+    dll.snowlink_engine_send_input.restype = ctypes.c_int32
+    dll.snowlink_engine_send_input.argtypes = [ctypes.c_void_p, ctypes.POINTER(_InputEvent)]
+    dll.snowlink_engine_set_remote_input_enabled.restype = ctypes.c_int32
+    dll.snowlink_engine_set_remote_input_enabled.argtypes = [ctypes.c_void_p, ctypes.c_int32]
     dll.snowlink_engine_get_decoder_name.restype = ctypes.c_int32
-    dll.snowlink_engine_get_decoder_name.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+    dll.snowlink_engine_get_decoder_name.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+    ]
     dll.snowlink_engine_get_decoder_status.restype = ctypes.c_int32
-    dll.snowlink_engine_get_decoder_status.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_double)]
+    dll.snowlink_engine_get_decoder_status.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_double),
+    ]
 
     dll.snowlink_engine_set_target_fps.restype = ctypes.c_int32
     dll.snowlink_engine_set_target_fps.argtypes = [ctypes.c_void_p, ctypes.c_int32]
@@ -361,12 +395,16 @@ class NativeEngine:
         """Initialize native ICE/DTLS-SRTP transport; media stays in C++."""
         self._ensure_alive()
         cfg = _TransportConfig(
-            bind_address.encode("utf-8"), port_min, port_max, mtu,
-            frame_queue_limit, nack_packet_limit,
+            bind_address.encode("utf-8"),
+            port_min,
+            port_max,
+            mtu,
+            frame_queue_limit,
+            nack_packet_limit,
         )
-        self._check(int(self._dll.snowlink_engine_connect_transport(
-            self._handle, ctypes.byref(cfg)
-        )))
+        self._check(
+            int(self._dll.snowlink_engine_connect_transport(self._handle, ctypes.byref(cfg)))
+        )
 
     def create_offer(self) -> None:
         self._ensure_alive()
@@ -390,14 +428,22 @@ class NativeEngine:
 
     def set_remote_description(self, *, sdp: str, sdp_type: str = "answer") -> None:
         self._ensure_alive()
-        self._check(int(self._dll.snowlink_engine_set_remote_sdp(
-            self._handle, sdp.encode("utf-8"), sdp_type.encode("ascii")
-        )))
+        self._check(
+            int(
+                self._dll.snowlink_engine_set_remote_sdp(
+                    self._handle, sdp.encode("utf-8"), sdp_type.encode("ascii")
+                )
+            )
+        )
 
     def start_receiver(self, *, hwnd: int, bind_address: str = "") -> None:
         self._ensure_alive()
         cfg = _TransportConfig(bind_address.encode(), 1024, 65535, 1200, 2, 256)
-        self._check(int(self._dll.snowlink_engine_start_receiver(self._handle, int(hwnd), ctypes.byref(cfg))))
+        self._check(
+            int(
+                self._dll.snowlink_engine_start_receiver(self._handle, int(hwnd), ctypes.byref(cfg))
+            )
+        )
 
     def create_receiver_answer(self) -> None:
         self._check(int(self._dll.snowlink_engine_create_receiver_answer(self._handle)))
@@ -411,22 +457,59 @@ class NativeEngine:
     def receiver_set_visible(self, visible: bool) -> None:
         self._check(int(self._dll.snowlink_engine_receiver_set_visible(self._handle, int(visible))))
 
-    def send_input(self, *, kind: int, code: int = 0, down: bool = False,
-                   x: int = 0, y: int = 0, delta: int = 0, sequence: int = 0) -> None:
-        event=_InputEvent(kind,code,int(down),0,x,y,delta,sequence)
+    def send_input(
+        self,
+        *,
+        kind: int,
+        code: int = 0,
+        down: bool = False,
+        x: int = 0,
+        y: int = 0,
+        delta: int = 0,
+        sequence: int = 0,
+    ) -> None:
+        event = _InputEvent(kind, code, int(down), 0, x, y, delta, sequence)
         # A channel which is still opening is not an authorization failure; UI
         # input is simply ignored until DTLS/SCTP is ready.
-        status=int(self._dll.snowlink_engine_send_input(self._handle,ctypes.byref(event)))
-        if status < 0:self._check(status)
+        status = int(self._dll.snowlink_engine_send_input(self._handle, ctypes.byref(event)))
+        if status < 0:
+            self._check(status)
+
+    def set_remote_input_enabled(self, enabled: bool) -> None:
+        self._ensure_alive()
+        self._check(
+            int(self._dll.snowlink_engine_set_remote_input_enabled(self._handle, int(enabled)))
+        )
 
     def decoder_status(self) -> dict[str, Any]:
         required = int(self._dll.snowlink_engine_get_decoder_name(self._handle, None, 0))
         name = ctypes.create_string_buffer(max(required, 1))
         if required > 0:
-            self._check(int(self._dll.snowlink_engine_get_decoder_name(self._handle, name, required)))
-        hardware = ctypes.c_int32(); width = ctypes.c_uint32(); height = ctypes.c_uint32(); fps = ctypes.c_double()
-        self._check(int(self._dll.snowlink_engine_get_decoder_status(self._handle, ctypes.byref(hardware), ctypes.byref(width), ctypes.byref(height), ctypes.byref(fps))))
-        return {"decoder_name": name.value.decode(errors="replace"), "hardware_accelerated": bool(hardware.value), "decoded_width": width.value, "decoded_height": height.value, "decode_fps": fps.value}
+            self._check(
+                int(self._dll.snowlink_engine_get_decoder_name(self._handle, name, required))
+            )
+        hardware = ctypes.c_int32()
+        width = ctypes.c_uint32()
+        height = ctypes.c_uint32()
+        fps = ctypes.c_double()
+        self._check(
+            int(
+                self._dll.snowlink_engine_get_decoder_status(
+                    self._handle,
+                    ctypes.byref(hardware),
+                    ctypes.byref(width),
+                    ctypes.byref(height),
+                    ctypes.byref(fps),
+                )
+            )
+        )
+        return {
+            "decoder_name": name.value.decode(errors="replace"),
+            "hardware_accelerated": bool(hardware.value),
+            "decoded_width": width.value,
+            "decoded_height": height.value,
+            "decode_fps": fps.value,
+        }
 
     def stop_stream(self) -> None:
         self._ensure_alive()
@@ -438,18 +521,12 @@ class NativeEngine:
 
     def set_bitrate(self, bitrate_bps: int) -> None:
         self._ensure_alive()
-        self._check(
-            int(self._dll.snowlink_engine_set_bitrate(self._handle, int(bitrate_bps)))
-        )
+        self._check(int(self._dll.snowlink_engine_set_bitrate(self._handle, int(bitrate_bps))))
 
     def set_resolution(self, width: int, height: int) -> None:
         self._ensure_alive()
         self._check(
-            int(
-                self._dll.snowlink_engine_set_resolution(
-                    self._handle, int(width), int(height)
-                )
-            )
+            int(self._dll.snowlink_engine_set_resolution(self._handle, int(width), int(height)))
         )
 
     def request_keyframe(self) -> int:
@@ -469,11 +546,7 @@ class NativeEngine:
         self._ensure_alive()
         raw = _CaptureStatus()
         self._check(
-            int(
-                self._dll.snowlink_engine_get_capture_status(
-                    self._handle, ctypes.byref(raw)
-                )
-            )
+            int(self._dll.snowlink_engine_get_capture_status(self._handle, ctypes.byref(raw)))
         )
         return NativeCaptureStatus(
             borderless_capture_available=bool(raw.borderless_capture_available),

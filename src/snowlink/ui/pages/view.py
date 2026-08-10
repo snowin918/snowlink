@@ -144,16 +144,24 @@ class ViewPage(QWidget):
             pass
 
     def native_input_event(self, event: dict[str, Any]) -> None:
-        engine=self._native_engine
-        if engine is None:return
+        engine = self._native_engine
+        if engine is None:
+            return
         try:
-            if event.get("kind")==1:
-                status=engine.decoder_status();sw=int(status["decoded_width"]);sh=int(status["decoded_height"])
-                dw=max(1,int(event["width"]));dh=max(1,int(event["height"]));scale=min(dw/sw,dh/sh) if sw and sh else 1.0
-                ox=(dw-sw*scale)/2;oy=(dh-sh*scale)/2
-                x=max(0,min(sw-1,int((event["x"]-ox)/scale)));y=max(0,min(sh-1,int((event["y"]-oy)/scale)))
-                engine.send_input(kind=1,x=x,y=y)
-            else:engine.send_input(**event)
+            if event.get("kind") == 1:
+                status = engine.decoder_status()
+                sw = int(status["decoded_width"])
+                sh = int(status["decoded_height"])
+                dw = max(1, int(event["width"]))
+                dh = max(1, int(event["height"]))
+                scale = min(dw / sw, dh / sh) if sw and sh else 1.0
+                ox = (dw - sw * scale) / 2
+                oy = (dh - sh * scale) / 2
+                x = max(0, min(sw - 1, int((event["x"] - ox) / scale)))
+                y = max(0, min(sh - 1, int((event["y"] - oy) / scale)))
+                engine.send_input(kind=1, x=x, y=y)
+            else:
+                engine.send_input(**event)
         except Exception:
             pass
 
@@ -161,12 +169,12 @@ class ViewPage(QWidget):
         if self._session.is_running:
             QMessageBox.warning(self, "Busy", "Already connected or connecting.")
             return
-        self.native_surface_requested.emit()
+        media_backend = str(getattr(self._preferences, "media_backend", "native_cpp"))
+        if media_backend == "native_cpp":
+            self.native_surface_requested.emit()
         remote_ip = self._ip.text().strip()
         if not remote_ip:
-            QMessageBox.warning(
-                self, "Missing address", "Enter the other PC’s address."
-            )
+            QMessageBox.warning(self, "Missing address", "Enter the other PC’s address.")
             return
         code = self._code.text().strip()
         if not code.isdigit() or len(code) != 6:
@@ -186,6 +194,7 @@ class ViewPage(QWidget):
             from snowlink.rtc.screen_session import (
                 ScreenViewConfiguration,
                 run_native_screen_view,
+                run_screen_view,
             )
 
             config = ScreenViewConfiguration(
@@ -201,11 +210,19 @@ class ViewPage(QWidget):
                 gain=controls.gain,
                 playback_controls=controls,
             )
-            if not self._native_surface_handle:
-                raise RuntimeError("Native video surface is unavailable")
-            return run_native_screen_view(config, hwnd=self._native_surface_handle,
-                stop_event=stop_event, on_state=on_state,
-                on_engine=lambda engine: setattr(self, "_native_engine", engine))
+            if media_backend == "native_cpp":
+                if not self._native_surface_handle:
+                    raise RuntimeError("Native video surface is unavailable")
+                return run_native_screen_view(
+                    config,
+                    hwnd=self._native_surface_handle,
+                    stop_event=stop_event,
+                    on_state=on_state,
+                    on_engine=lambda engine: setattr(self, "_native_engine", engine),
+                )
+            return run_screen_view(
+                config, stop_event=stop_event, on_state=on_state, on_frame=on_frame
+            )
 
         try:
             self._session.start(factory)

@@ -98,6 +98,7 @@ SNOWLINK_API int32_t snowlink_engine_stop_receiver(void* engine_handle) noexcept
 SNOWLINK_API int32_t snowlink_engine_receiver_resize(void* engine_handle) noexcept;
 SNOWLINK_API int32_t snowlink_engine_receiver_set_visible(void* engine_handle, int32_t visible) noexcept;
 SNOWLINK_API int32_t snowlink_engine_send_input(void* engine_handle, const SnowlinkInputEvent* event) noexcept;
+SNOWLINK_API int32_t snowlink_engine_set_remote_input_enabled(void* engine_handle, int32_t enabled) noexcept;
 SNOWLINK_API int32_t snowlink_engine_get_decoder_name(void* engine_handle, char* buffer, uint32_t buffer_size) noexcept;
 SNOWLINK_API int32_t snowlink_engine_get_decoder_status(void* engine_handle, int32_t* hardware, uint32_t* width, uint32_t* height, double* fps) noexcept;
 SNOWLINK_API int32_t snowlink_engine_set_target_fps(void* engine_handle, int32_t target_fps) noexcept;

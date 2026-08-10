@@ -15,13 +15,13 @@ KNOWN_MEDIA_ENGINES: tuple[MediaEngineName, ...] = (
 
 
 def normalize_media_engine(name: str | None) -> MediaEngineName:
-    """Return a known media-engine name; unknown values fall back to legacy."""
+    """Return a known media-engine name; missing/unknown values use native."""
     if name is None:
-        return MEDIA_ENGINE_LEGACY_PYTHON
+        return MEDIA_ENGINE_NATIVE_CPP
     normalized = str(name).strip().lower()
     if normalized in KNOWN_MEDIA_ENGINES:
         return normalized  # type: ignore[return-value]
-    return MEDIA_ENGINE_LEGACY_PYTHON
+    return MEDIA_ENGINE_NATIVE_CPP
 
 
 def resolve_effective_media_engine(
@@ -29,15 +29,8 @@ def resolve_effective_media_engine(
     *,
     native_available: bool,
 ) -> MediaEngineName:
-    """Choose the engine that will actually run sessions today.
-
-    ``native_cpp`` is selectable for lifecycle probing, but production share/view
-    still uses ``legacy_python`` until capture/encode/transport are migrated.
-    """
+    """Choose the requested engine, falling back if the native DLL is absent."""
     wanted = normalize_media_engine(requested)
     if wanted == MEDIA_ENGINE_NATIVE_CPP and not native_available:
-        return MEDIA_ENGINE_LEGACY_PYTHON
-    # Streaming path is not wired for native yet — keep sessions on legacy.
-    if wanted == MEDIA_ENGINE_NATIVE_CPP:
         return MEDIA_ENGINE_LEGACY_PYTHON
     return wanted

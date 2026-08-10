@@ -49,6 +49,7 @@ public:
     int32_t receiver_resize();
     int32_t receiver_set_visible(bool visible);
     int32_t send_remote_input(const RemoteInputEvent& event);
+    int32_t set_remote_input_enabled(bool enabled);
     int32_t get_decoder_info(std::string& name, bool& hardware, std::uint32_t& width,
                              std::uint32_t& height, double& fps) const;
 
@@ -95,6 +96,7 @@ private:
     std::deque<EncodedFrame> receive_queue_;
     std::uint64_t receive_frame_id_ = 0;
     bool awaiting_keyframe_ = true;
+    bool remote_input_enabled_ = true;
     CaptureConfig capture_config_{};
 };
 

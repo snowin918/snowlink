@@ -71,11 +71,12 @@ class ScreenShareConfiguration:
     bind_ip: str
     signaling_port: int = DEFAULT_SIGNALING_PORT
     monitor: int = 0
-    backend: Literal["dxgi", "winrt"] = "dxgi"
+    backend: Literal["automatic", "dxgi", "winrt"] = "automatic"
     preset: PresetName = "balanced"
     width: int = DEFAULT_PRESET.width
     height: int = DEFAULT_PRESET.height
     fps: int = DEFAULT_PRESET.fps
+    bitrate_bps: int = 2_500_000
     allow_h264_fallback: bool = False
     enable_audio: bool = True
     audio_capture_device: str = "default"
@@ -94,7 +95,7 @@ class ScreenShareConfiguration:
         bind_ip: str,
         signaling_port: int = DEFAULT_SIGNALING_PORT,
         monitor: int = 0,
-        backend: Literal["dxgi", "winrt"] = "dxgi",
+        backend: Literal["automatic", "dxgi", "winrt"] = "automatic",
         preset: str = "low",
         allow_h264_fallback: bool = False,
         enable_audio: bool = True,
@@ -102,6 +103,8 @@ class ScreenShareConfiguration:
         auto_approve: bool = False,
         approval_handler: ApprovalHandler | None = None,
         pairing_code: str | None = None,
+        target_fps: int | None = None,
+        bitrate_bps: int = 2_500_000,
     ) -> ScreenShareConfiguration:
         resolved = resolve_preset(preset)
         return cls(
@@ -112,7 +115,8 @@ class ScreenShareConfiguration:
             preset=resolved.name,
             width=resolved.width,
             height=resolved.height,
-            fps=resolved.fps,
+            fps=int(target_fps or resolved.fps),
+            bitrate_bps=int(bitrate_bps),
             allow_h264_fallback=allow_h264_fallback,
             enable_audio=enable_audio,
             audio_capture_device=audio_capture_device,
@@ -122,9 +126,10 @@ class ScreenShareConfiguration:
         )
 
     def capture_config(self) -> CaptureConfiguration:
+        legacy_backend = "winrt" if self.backend == "automatic" else self.backend
         return CaptureConfiguration(
             monitor=self.monitor,
-            backend=self.backend,
+            backend=legacy_backend,
             requested_fps=self.fps,
             requested_width=self.width,
             requested_height=self.height,
@@ -179,8 +184,183 @@ class ScreenSessionState:
 StateCallback = Callable[[ScreenSessionState], None]
 
 
+def _native_session_stats(engine: Any, *, width: int, height: int) -> SessionStats:
+    raw = engine.get_stats()
+    return SessionStats(
+        capture_fps=raw.capture_fps,
+        render_fps=raw.encode_fps,
+        width=width,
+        height=height,
+        estimated_bitrate_kbps=raw.send_bitrate / 1000.0,
+        rtt_ms=raw.network_rtt_ms,
+        packet_loss=raw.estimated_loss,
+        dropped_video_frames=(raw.frames_dropped + raw.transport_frames_dropped),
+        frames_sent=raw.frames_encoded,
+    )
+
+
+async def run_native_screen_share(
+    config: ScreenShareConfiguration,
+    *,
+    stop_event: asyncio.Event | None = None,
+    on_state: StateCallback | None = None,
+    remote_control_enabled: bool = True,
+) -> ScreenSessionState:
+    """Run capture through transport wholly in C++; Python handles control only."""
+    from snowlink.native_engine import NativeEngine
+
+    adapters = _load_adapters()
+    validate_local_ip(config.bind_ip, adapters)
+    stop = stop_event or asyncio.Event()
+    pairing = (
+        PairingAuthority(session_id=generate_session_id(), code=config.pairing_code)
+        if config.pairing_code
+        else PairingAuthority(session_id=generate_session_id())
+    )
+    state = ScreenSessionState(
+        role="share",
+        phase="starting",
+        bind_ip=config.bind_ip,
+        port=config.signaling_port,
+        pairing_code=pairing.code,
+        detail="Starting native screen sharing...",
+    )
+    _notify(on_state, state)
+    engine = NativeEngine.create()
+    server: WsSignalingServer | None = None
+    backend_id = {"automatic": -1, "dxgi": 0, "winrt": 1}[config.backend]
+
+    async def approve(info: PairingRequestInfo) -> bool:
+        state.phase = "awaiting_approval"
+        state.pending_approval = info
+        state.detail = f"Approve viewer from {info.remote_addr}?"
+        _notify(on_state, state)
+        if config.approval_handler is not None:
+            return await config.approval_handler(info)
+        return False
+
+    async def offer_factory() -> dict[str, str]:
+        state.phase = "negotiating"
+        state.pending_approval = None
+        state.detail = "Approved; negotiating native H.264 transport"
+        _notify(on_state, state)
+        engine.connect(bind_address=config.bind_ip)
+        engine.create_offer()
+        deadline = time.monotonic() + config.timeouts.ice_gathering_s
+        while time.monotonic() < deadline and not stop.is_set():
+            offer = engine.local_description()
+            if offer is not None:
+                return offer
+            await asyncio.sleep(0.02)
+        raise TimeoutError("Native ICE gathering timed out")
+
+    try:
+        engine.initialize()
+        engine.set_remote_input_enabled(remote_control_enabled)
+        engine.start_capture(
+            monitor_index=config.monitor,
+            width=config.width,
+            height=config.height,
+            target_fps=config.fps,
+            backend=backend_id,
+        )
+        capture_status = engine.get_capture_status()
+        if config.backend in {"automatic", "winrt"}:
+            if capture_status.borderless_capture_granted:
+                border_note = "borderless WGC granted"
+            elif capture_status.capture_border_active:
+                border_note = "Windows capture border active (borderless permission not granted)"
+            else:
+                border_note = "borderless WGC unavailable or DXGI fallback active"
+        else:
+            border_note = "DXGI capture"
+        server = WsSignalingServer(
+            bind_ip=config.bind_ip,
+            port=config.signaling_port,
+            pairing=pairing,
+            offer_factory=offer_factory,
+            approval_handler=approve,
+            auto_approve=config.auto_approve,
+        )
+        await server.start()
+        state.port = server.port
+        state.phase = "waiting_for_viewer"
+        state.detail = f"Native share ready ({border_note})"
+        _notify(on_state, state)
+
+        answer: dict[str, str] | None = None
+        while answer is None and not stop.is_set():
+            try:
+                answer = await server.wait_answer(timeout_s=1.0)
+            except TimeoutError:
+                continue
+        if answer is not None:
+            engine.set_remote_description(sdp=answer["sdp"], sdp_type=answer["type"])
+            connect_deadline = time.monotonic() + config.timeouts.ice_connection_s
+            while True:
+                try:
+                    engine.start_stream(
+                        width=config.width,
+                        height=config.height,
+                        target_fps=config.fps,
+                        bitrate_bps=config.bitrate_bps,
+                    )
+                    break
+                except Exception as exc:
+                    if time.monotonic() >= connect_deadline:
+                        raise RuntimeError(
+                            "Native media transport did not connect in time"
+                        ) from exc
+                    await asyncio.sleep(0.1)
+            state.phase = "sharing"
+            state.sharing_active = True
+            state.detail = f"Sharing with native H.264 ({border_note})"
+            while not stop.is_set():
+                status = engine.get_capture_status()
+                if status.device_lost:
+                    raise RuntimeError("Capture device was lost")
+                if status.access_lost and not status.capture_active:
+                    raise RuntimeError("Capture was lost or the display was disconnected")
+                state.frames = engine.get_stats().frames_encoded
+                state.stats = _native_session_stats(
+                    engine,
+                    width=status.width or config.width,
+                    height=status.height or config.height,
+                )
+                _notify(on_state, state)
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=1.0)
+                except TimeoutError:
+                    pass
+        state.phase = "stopped"
+        state.sharing_active = False
+        state.detail = "Sharing stopped"
+        _notify(on_state, state)
+    except Exception as exc:
+        state.phase = "failed"
+        state.sharing_active = False
+        state.error = str(exc)
+        state.detail = str(exc)
+        _notify(on_state, state)
+    finally:
+        if server is not None:
+            await server.close()
+        for operation in (engine.stop_stream, engine.stop_capture, engine.shutdown):
+            try:
+                operation()
+            except Exception:
+                logger.debug("Native share cleanup operation failed", exc_info=True)
+        try:
+            engine.destroy()
+        except Exception:
+            logger.debug("Native engine destroy failed", exc_info=True)
+    return state
+
+
 async def run_native_screen_view(
-    config: ScreenViewConfiguration, *, hwnd: int,
+    config: ScreenViewConfiguration,
+    *,
+    hwnd: int,
     stop_event: asyncio.Event | None = None,
     on_state: StateCallback | None = None,
     on_engine: Callable[[Any], None] | None = None,
@@ -189,8 +369,13 @@ async def run_native_screen_view(
     from snowlink.native_engine import NativeEngine
 
     stop = stop_event or asyncio.Event()
-    state = ScreenSessionState(role="view", phase="connecting", remote_ip=config.remote_ip,
-                               port=config.signaling_port, pairing_code=config.pairing_code)
+    state = ScreenSessionState(
+        role="view",
+        phase="connecting",
+        remote_ip=config.remote_ip,
+        port=config.signaling_port,
+        pairing_code=config.pairing_code,
+    )
     _notify(on_state, state)
     client: WsSignalingClient | None = None
     engine = NativeEngine.create()
@@ -199,13 +384,19 @@ async def run_native_screen_view(
     try:
         engine.initialize()
         engine.start_receiver(hwnd=hwnd, bind_address=config.requested_source_ip or "")
-        client = WsSignalingClient(remote_ip=config.remote_ip, port=config.signaling_port,
-            pairing_code=config.pairing_code, source_ip=config.requested_source_ip,
-            connect_timeout_s=config.timeouts.signaling_connect_s)
-        state.phase = "pairing"; state.detail = "Connecting and pairing"
+        client = WsSignalingClient(
+            remote_ip=config.remote_ip,
+            port=config.signaling_port,
+            pairing_code=config.pairing_code,
+            source_ip=config.requested_source_ip,
+            connect_timeout_s=config.timeouts.signaling_connect_s,
+        )
+        state.phase = "pairing"
+        state.detail = "Connecting and pairing"
         _notify(on_state, state)
         await client.connect_and_pair_with_retry(max_attempts=5, stop_event=stop)
-        state.phase = "negotiating"; state.detail = "Paired; negotiating native H.264 receiver"
+        state.phase = "negotiating"
+        state.detail = "Paired; negotiating native H.264 receiver"
         _notify(on_state, state)
         offer = await asyncio.wait_for(client.wait_offer(), timeout=config.timeouts.offer_answer_s)
         engine.set_remote_description(sdp=offer["sdp"], sdp_type=offer["type"])
@@ -214,31 +405,60 @@ async def run_native_screen_view(
         answer = None
         while answer is None and time.perf_counter() < deadline:
             answer = engine.local_description()
-            if answer is None: await asyncio.sleep(0.02)
-        if answer is None: raise TimeoutError("native ICE gathering timed out")
+            if answer is None:
+                await asyncio.sleep(0.02)
+        if answer is None:
+            raise TimeoutError("native ICE gathering timed out")
         await client.send_answer(sdp=answer["sdp"], sdp_type=answer["type"])
-        state.phase = "viewing"; state.detail = "Receiving remote screen (native GPU video)"
+        state.phase = "viewing"
+        state.detail = "Receiving remote screen (native GPU video)"
         _notify(on_state, state)
-        last_size = (0, 0)
         while not stop.is_set():
             decoder = engine.decoder_status()
             size = (int(decoder["decoded_width"]), int(decoder["decoded_height"]))
-            if size != last_size and all(size):
-                last_size = size
-                state.detail = f"Native {decoder['decoder_name']} — {size[0]}×{size[1]} @ {decoder['decode_fps']:.1f} fps"
-                state.frames = engine.get_stats().frames_decoded
-                _notify(on_state, state)
-            try: await asyncio.wait_for(stop.wait(), timeout=0.5)
-            except TimeoutError: pass
-        state.phase = "stopped"; state.detail = "View stopped"
+            raw_stats = engine.get_stats()
+            state.frames = raw_stats.frames_decoded
+            state.stats = SessionStats(
+                render_fps=raw_stats.render_fps or raw_stats.decode_fps,
+                width=size[0] or None,
+                height=size[1] or None,
+                rtt_ms=raw_stats.network_rtt_ms,
+                packet_loss=raw_stats.estimated_loss,
+                dropped_video_frames=raw_stats.frames_dropped,
+                frames_received=raw_stats.frames_decoded,
+            )
+            if all(size):
+                state.detail = (
+                    f"Native {decoder['decoder_name']} — {size[0]}×{size[1]} "
+                    f"@ {decoder['decode_fps']:.1f} fps"
+                )
+            _notify(on_state, state)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=1.0)
+            except TimeoutError:
+                pass
+        state.phase = "stopped"
+        state.detail = "View stopped"
     except Exception as exc:
-        state.phase = "failed"; state.error = str(exc); state.detail = str(exc)
+        state.phase = "failed"
+        state.error = str(exc)
+        state.detail = str(exc)
         _notify(on_state, state)
     finally:
-        if client is not None: await client.close()
-        try: engine.stop_receiver()
-        except Exception: pass
-        engine.shutdown(); engine.destroy()
+        if client is not None:
+            await client.close()
+        try:
+            engine.stop_receiver()
+        except Exception:
+            pass
+        try:
+            engine.shutdown()
+        except Exception:
+            logger.debug("Native receiver shutdown failed", exc_info=True)
+        try:
+            engine.destroy()
+        except Exception:
+            logger.debug("Native receiver destroy failed", exc_info=True)
     return state
 
 
@@ -402,9 +622,7 @@ async def run_screen_share(
             offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
             await wait_ice_gathering_complete(pc, timeout_s=config.timeouts.ice_gathering_s)
-            apply_ice_policy_to_local_description(
-                pc, preferred_host_ip_of(pc) or config.bind_ip
-            )
+            apply_ice_policy_to_local_description(pc, preferred_host_ip_of(pc) or config.bind_ip)
             state.phase = "negotiating"
             state.pending_approval = None
             state.detail = "Sending offer; waiting for viewer answer"
@@ -446,9 +664,7 @@ async def run_screen_share(
             return state
 
         assert pc is not None and answer is not None
-        await pc.setRemoteDescription(
-            RTCSessionDescription(sdp=answer["sdp"], type=answer["type"])
-        )
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=answer["sdp"], type=answer["type"]))
         await wait_ice_connected(pc, timeout_s=config.timeouts.ice_connection_s)
         state.phase = "sharing"
         state.sharing_active = True
@@ -514,15 +730,11 @@ async def run_screen_share(
                     }
                     raise WebRTCError(
                         failure_for(
-                            "AUDIO_DEVICE_CHANGED"
-                            if use_device_changed
-                            else "CAPTURE_FAILED",
+                            "AUDIO_DEVICE_CHANGED" if use_device_changed else "CAPTURE_FAILED",
                             "System-audio loopback capture failed. "
                             "Stop sharing, re-select the loopback device matching "
                             "your active Windows output, then Start Sharing again.",
-                            likely_cause=str(
-                                getattr(audio_fatal, "message", audio_fatal)
-                            ),
+                            likely_cause=str(getattr(audio_fatal, "message", audio_fatal)),
                         )
                     )
 
@@ -723,9 +935,7 @@ async def run_screen_view(
                 _notify(on_state, state)
             elif err is not None:
                 state.phase = "reconnecting"
-                state.detail = (
-                    f"Signaling attempt {attempt} failed; backing off before retry…"
-                )
+                state.detail = f"Signaling attempt {attempt} failed; backing off before retry…"
                 _notify(on_state, state)
 
         await client.connect_and_pair_with_retry(
@@ -767,9 +977,7 @@ async def run_screen_view(
         pc.on("track")(_on_track)
         pc.on("connectionstatechange")(_on_conn)
 
-        await pc.setRemoteDescription(
-            RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
-        )
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=offer["sdp"], type=offer["type"]))
         prefer_video_codec(
             pc,
             prefer="video/VP8",
@@ -1006,18 +1214,14 @@ async def run_screen_view(
                 if controls.muted:
                     state.detail = "Receiving remote screen (viewer muted)"
                 elif state.audio_frames < 5:
-                    state.detail = (
-                        "Receiving remote screen; waiting for remote audio frames…"
-                    )
+                    state.detail = "Receiving remote screen; waiting for remote audio frames…"
                 elif peak < 1e-4:
                     state.detail = (
                         "Remote audio is silent — on the sharer, pick the loopback "
                         "for the active Windows output and play non-DRM audio"
                     )
                 elif playback_worker is not None and playback_worker.samples_played == 0:
-                    state.detail = (
-                        "Remote audio buffered; starting WASAPI playback…"
-                    )
+                    state.detail = "Remote audio buffered; starting WASAPI playback…"
                 else:
                     state.detail = "Receiving remote screen + system audio"
 
@@ -1035,9 +1239,7 @@ async def run_screen_view(
                 if audio_consumer is not None:
                     peak = float(getattr(audio_consumer, "peak_level", 0.0) or 0.0)
                     if playback_worker is not None:
-                        peak = max(
-                            peak, float(getattr(playback_worker, "peak_level", 0.0) or 0.0)
-                        )
+                        peak = max(peak, float(getattr(playback_worker, "peak_level", 0.0) or 0.0))
                     logger.info(
                         "view audio: frames=%s peak=%.4f underruns=%s played=%s muted=%s",
                         state.audio_frames,

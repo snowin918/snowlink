@@ -73,7 +73,13 @@ class ShareController(QObject):
         enable_audio = bool(getattr(prefs, "enable_audio", True)) if prefs else True
         monitor = int(getattr(prefs, "share_monitor", 0) if prefs else 0)
         preset = str(getattr(prefs, "preset", "low") if prefs else "low")
-        backend = str(getattr(prefs, "backend", "dxgi") if prefs else "dxgi")
+        backend = str(getattr(prefs, "backend", "automatic") if prefs else "automatic")
+        media_backend = str(
+            getattr(prefs, "media_backend", "native_cpp") if prefs else "native_cpp"
+        )
+        target_fps = int(getattr(prefs, "target_fps", 30) if prefs else 30)
+        bitrate_bps = int(getattr(prefs, "bitrate_bps", 2_500_000) if prefs else 2_500_000)
+        remote_control = bool(getattr(prefs, "remote_control_enabled", True) if prefs else True)
         port = int(getattr(prefs, "signaling_port", 3847) if prefs else 3847)
         audio_device = str(
             getattr(prefs, "audio_capture_device", "default") if prefs else "default"
@@ -83,6 +89,7 @@ class ShareController(QObject):
         def factory(stop_event: Any, on_state: Any, _on_frame: Any) -> Any:
             from snowlink.rtc.screen_session import (
                 ScreenShareConfiguration,
+                run_native_screen_share,
                 run_screen_share,
             )
 
@@ -96,7 +103,16 @@ class ShareController(QObject):
                 audio_capture_device=audio_device,
                 auto_approve=False,
                 approval_handler=worker.request_approval,
+                target_fps=target_fps,
+                bitrate_bps=bitrate_bps,
             )
+            if media_backend == "native_cpp":
+                return run_native_screen_share(
+                    config,
+                    stop_event=stop_event,
+                    on_state=on_state,
+                    remote_control_enabled=remote_control,
+                )
             return run_screen_share(config, stop_event=stop_event, on_state=on_state)
 
         try:

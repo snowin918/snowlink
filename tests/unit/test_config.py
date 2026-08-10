@@ -25,7 +25,7 @@ def test_preferences_roundtrip(tmp_path: Path) -> None:
     assert loaded.signaling_port == 4000
     assert loaded.preset == "balanced"
     assert loaded.backend == "winrt"
-    assert loaded.media_engine == "legacy_python"
+    assert loaded.media_backend == "native_cpp"
     assert loaded.enable_audio is False
     assert loaded.preferred_bind_ip == "192.168.1.10"
     assert loaded.last_remote_ip == "192.168.1.20"
@@ -37,7 +37,7 @@ def test_missing_config_returns_defaults(tmp_path: Path) -> None:
     loaded = load_preferences(path=tmp_path / "missing.toml")
     assert loaded.signaling_port == 3847
     assert loaded.preset == "low"
-    assert loaded.media_engine == "legacy_python"
+    assert loaded.media_backend == "native_cpp"
     assert loaded.enable_audio is True
     assert loaded.auto_start_share is True
     assert loaded.audio_capture_device == "default"

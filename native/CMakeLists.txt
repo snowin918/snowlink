@@ -16,6 +16,7 @@ add_library(snowlink_engine SHARED
     src/cursor/cursor.cpp
     src/input/input.cpp
     src/capture/wgc_capture_backend.cpp
+    src/capture/dxgi_capture_backend.cpp
 )
 
 target_include_directories(snowlink_engine
@@ -46,11 +47,13 @@ set_target_properties(snowlink_engine PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin
 )
 
-option(SNOWLINK_BUILD_CAPTURE_TEST "Build the GPU-only WGC development test" ON)
+option(SNOWLINK_BUILD_CAPTURE_TEST "Build the GPU-only native capture development test" ON)
 if (SNOWLINK_BUILD_CAPTURE_TEST)
     add_executable(snowlink_capture_test
         tools/capture_test.cpp
-        src/capture/wgc_capture_backend.cpp)
+        src/capture/capture_manager.cpp
+        src/capture/wgc_capture_backend.cpp
+        src/capture/dxgi_capture_backend.cpp)
     target_include_directories(snowlink_capture_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_definitions(snowlink_capture_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(snowlink_capture_test PRIVATE d3d11 dxgi windowsapp)

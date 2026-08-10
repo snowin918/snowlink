@@ -291,7 +291,8 @@ int32_t WgcCaptureBackend::stop() {
     return 0;
 }
 
-int32_t WgcCaptureBackend::get_latest_frame(ID3D11Texture2D** texture, uint64_t* id) const {
+int32_t WgcCaptureBackend::get_latest_frame(ID3D11Texture2D** texture, uint64_t* id,
+                                             FrameMetadata* metadata, PointerState* pointer) const {
     if (!texture || !id) return kInvalidArgument;
     *texture = nullptr;
     *id = 0;
@@ -301,6 +302,13 @@ int32_t WgcCaptureBackend::get_latest_frame(ID3D11Texture2D** texture, uint64_t*
     if (!impl->published_id || !impl->slots[impl->published_slot]) return kNoFrame;
     impl->slots[impl->published_slot].CopyTo(texture);
     *id = impl->published_id;
+    if (metadata) {
+        *metadata = {};
+        metadata->width = static_cast<uint32_t>(impl->width.load());
+        metadata->height = static_cast<uint32_t>(impl->height.load());
+        metadata->desktop_updated = true;
+    }
+    if (pointer) *pointer = {};
     impl->last_acquired.store(*id);
     return 0;
 }
@@ -328,6 +336,7 @@ int32_t WgcCaptureBackend::get_capture_status(CaptureStatus& status) const {
     status.device_lost = impl->device_lost.load();
     status.width = impl->width.load();
     status.height = impl->height.load();
+    status.backend = static_cast<int32_t>(CaptureBackend::Wgc);
     return 0;
 }
 

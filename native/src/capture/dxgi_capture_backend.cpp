@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <dxgi1_2.h>
 #include <wrl.h>
 
@@ -71,10 +72,18 @@ struct DxgiCaptureBackend::Impl {
     CaptureConfig config{};
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
+    ComPtr<ID3D11Device> consumer_device;
+    ComPtr<ID3D11DeviceContext> consumer_context;
     ComPtr<IDXGIOutputDuplication> duplication;
     std::array<ComPtr<ID3D11Texture2D>, 2> slots;
+    std::array<ComPtr<IDXGIKeyedMutex>, 2> producer_mutexes;
+    std::array<ComPtr<ID3D11Texture2D>, 2> consumer_shared_slots;
+    std::array<ComPtr<IDXGIKeyedMutex>, 2> consumer_mutexes;
+    std::array<ComPtr<ID3D11Texture2D>, 2> consumer_slots;
     uint32_t published_slot = 0;
+    uint32_t consumer_slot = 0;
     uint64_t published_id = 0;
+    uint64_t materialized_id = 0;
     FrameMetadata metadata;
     PointerState pointer;
     mutable std::mutex mutex;
@@ -87,7 +96,10 @@ struct DxgiCaptureBackend::Impl {
 
     HRESULT create_duplication() noexcept {
         duplication.Reset(); context.Reset(); device.Reset();
-        { std::scoped_lock lock(mutex); slots = {}; published_id = 0; }
+        consumer_context.Reset(); consumer_device.Reset();
+        { std::scoped_lock lock(mutex); slots = {}; producer_mutexes = {};
+          consumer_shared_slots = {}; consumer_mutexes = {}; consumer_slots = {};
+          published_id = materialized_id = 0; }
         const HMONITOR monitor = config.display_id
             ? reinterpret_cast<HMONITOR>(static_cast<uintptr_t>(config.display_id))
             : monitor_by_index(config.monitor_index);
@@ -96,11 +108,15 @@ struct DxgiCaptureBackend::Impl {
         ComPtr<IDXGIOutput1> output;
         HRESULT hr = find_output(monitor, adapter, output);
         if (FAILED(hr)) return hr;
-        UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+        UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
         D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
         D3D_FEATURE_LEVEL level{};
         hr = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags,
             levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &device, &level, &context);
+        if (FAILED(hr)) return hr;
+        hr = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags,
+            levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
+            &consumer_device, &level, &consumer_context);
         if (FAILED(hr)) return hr;
         hr = output->DuplicateOutput(device.Get(), &duplication);
         if (FAILED(hr)) return hr;
@@ -124,13 +140,40 @@ struct DxgiCaptureBackend::Impl {
         D3D11_TEXTURE2D_DESC desc = source_desc;
         desc.Usage = D3D11_USAGE_DEFAULT; desc.CPUAccessFlags = 0;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-        desc.MiscFlags = 0;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+            D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
         std::array<ComPtr<ID3D11Texture2D>, 2> fresh;
-        for (auto& slot : fresh) {
-            HRESULT hr = device->CreateTexture2D(&desc, nullptr, &slot);
+        std::array<ComPtr<IDXGIKeyedMutex>, 2> fresh_producer_mutexes;
+        std::array<ComPtr<ID3D11Texture2D>, 2> fresh_consumer_shared;
+        std::array<ComPtr<IDXGIKeyedMutex>, 2> fresh_consumer_mutexes;
+        std::array<ComPtr<ID3D11Texture2D>, 2> fresh_consumer_slots;
+        ComPtr<ID3D11Device1> consumer_device1;
+        HRESULT hr = consumer_device.As(&consumer_device1);
+        if (FAILED(hr)) return hr;
+        for (std::size_t i = 0; i < fresh.size(); ++i) {
+            hr = device->CreateTexture2D(&desc, nullptr, &fresh[i]);
             if (FAILED(hr)) return hr;
+            if (FAILED(hr = fresh[i].As(&fresh_producer_mutexes[i]))) return hr;
+            ComPtr<IDXGIResource1> resource;
+            if (FAILED(hr = fresh[i].As(&resource))) return hr;
+            HANDLE shared = nullptr;
+            hr = resource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ |
+                DXGI_SHARED_RESOURCE_WRITE, nullptr, &shared);
+            if (FAILED(hr)) return hr;
+            hr = consumer_device1->OpenSharedResource1(
+                shared, IID_PPV_ARGS(&fresh_consumer_shared[i]));
+            CloseHandle(shared);
+            if (FAILED(hr) || FAILED(hr = fresh_consumer_shared[i].As(&fresh_consumer_mutexes[i])))
+                return FAILED(hr) ? hr : E_NOINTERFACE;
+            D3D11_TEXTURE2D_DESC local = desc; local.MiscFlags = 0;
+            if (FAILED(hr = consumer_device->CreateTexture2D(
+                    &local, nullptr, &fresh_consumer_slots[i]))) return hr;
         }
-        slots = std::move(fresh); published_id = 0; published_slot = 0;
+        slots = std::move(fresh); producer_mutexes = std::move(fresh_producer_mutexes);
+        consumer_shared_slots = std::move(fresh_consumer_shared);
+        consumer_mutexes = std::move(fresh_consumer_mutexes);
+        consumer_slots = std::move(fresh_consumer_slots);
+        published_id = materialized_id = 0; published_slot = consumer_slot = 0;
         width.store(static_cast<int32_t>(desc.Width)); height.store(static_cast<int32_t>(desc.Height));
         return S_OK;
     }
@@ -206,10 +249,33 @@ struct DxgiCaptureBackend::Impl {
             D3D11_TEXTURE2D_DESC desc{}; source->GetDesc(&desc);
             if (FAILED(ensure_slots(desc))) continue;
             collect_metadata(info, desc.Width, desc.Height);
+
+            // Desktop Duplication wakes for pointer-only changes too.  Snowlink
+            // sends the cursor on its own low-latency channel, so publishing a
+            // full desktop texture here would needlessly run GPU processing and
+            // video encoding while the desktop itself is static.  The first
+            // desktop image and every real dirty/move update have
+            // AccumulatedFrames != 0 and continue through the normal path.
+            if (info.AccumulatedFrames == 0) continue;
             {
                 std::scoped_lock lock(mutex);
+                if (published_id != materialized_id) {
+                    // The prior publication was superseded before the consumer
+                    // copied it. Return its keyed mutex to the producer instead
+                    // of permanently stranding one of the two bounded slots.
+                    const HRESULT stale = consumer_mutexes[published_slot]->AcquireSync(1, 0);
+                    if (stale == S_OK) {
+                        consumer_mutexes[published_slot]->ReleaseSync(0);
+                        materialized_id = published_id;
+                        ++replaced;
+                    }
+                }
                 const uint32_t next = (published_slot + 1u) % 2u;
+                const HRESULT sync = producer_mutexes[next]->AcquireSync(0, 0);
+                if (sync == WAIT_TIMEOUT) { ++replaced; continue; }
+                if (FAILED(sync)) { device_lost.store(true); continue; }
                 context->CopyResource(slots[next].Get(), source.Get());
+                producer_mutexes[next]->ReleaseSync(1);
                 if (published_id && last_acquired.load() < published_id) ++replaced;
                 published_slot = next; ++published_id; ++frames;
             }
@@ -221,7 +287,9 @@ struct DxgiCaptureBackend::Impl {
         stopping.store(true);
         if (worker.joinable()) worker.join();
         std::scoped_lock lock(mutex);
-        slots = {}; duplication.Reset(); context.Reset(); device.Reset();
+        slots = {}; producer_mutexes = {}; consumer_shared_slots = {};
+        consumer_mutexes = {}; consumer_slots = {}; duplication.Reset();
+        consumer_context.Reset(); consumer_device.Reset(); context.Reset(); device.Reset();
     }
 };
 
@@ -245,8 +313,20 @@ int32_t DxgiCaptureBackend::get_latest_frame(ID3D11Texture2D** texture, uint64_t
     *texture = nullptr; *id = 0;
     auto impl = impl_; if (!impl) return kNotRunning;
     std::scoped_lock lock(impl->mutex);
-    if (!impl->published_id || !impl->slots[impl->published_slot]) return kNoFrame;
-    impl->slots[impl->published_slot].CopyTo(texture); *id = impl->published_id;
+    if (!impl->published_id || !impl->consumer_slots[0]) return kNoFrame;
+    if (impl->materialized_id != impl->published_id) {
+        const auto source_slot = impl->published_slot;
+        const HRESULT sync = impl->consumer_mutexes[source_slot]->AcquireSync(1, 100);
+        if (sync == WAIT_TIMEOUT) return kNoFrame;
+        if (FAILED(sync)) return static_cast<int32_t>(sync);
+        impl->consumer_slot = (impl->consumer_slot + 1u) % 2u;
+        impl->consumer_context->CopyResource(
+            impl->consumer_slots[impl->consumer_slot].Get(),
+            impl->consumer_shared_slots[source_slot].Get());
+        impl->consumer_mutexes[source_slot]->ReleaseSync(0);
+        impl->materialized_id = impl->published_id;
+    }
+    impl->consumer_slots[impl->consumer_slot].CopyTo(texture); *id = impl->materialized_id;
     if (metadata) *metadata = impl->metadata;
     if (pointer) *pointer = impl->pointer;
     impl->last_acquired.store(*id); return 0;

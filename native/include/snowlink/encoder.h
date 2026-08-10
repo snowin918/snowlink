@@ -52,6 +52,7 @@ public:
     virtual int32_t initialize(ID3D11Device* device, const EncoderSettings& settings) = 0;
     virtual int32_t encode(ID3D11Texture2D* texture, std::uint64_t timestamp,
                            std::vector<EncodedFrame>& output) = 0;
+    virtual int32_t poll(std::vector<EncodedFrame>& output) = 0;
     virtual int32_t request_keyframe() = 0;
     virtual int32_t set_bitrate(std::uint32_t bitrate) = 0;
     virtual int32_t set_fps(std::uint32_t fps) = 0;
@@ -71,6 +72,7 @@ public:
     int32_t initialize(ID3D11Device* device, const EncoderSettings& settings) override;
     int32_t encode(ID3D11Texture2D* texture, std::uint64_t timestamp,
                    std::vector<EncodedFrame>& output) override;
+    int32_t poll(std::vector<EncodedFrame>& output) override;
     int32_t request_keyframe() override;
     int32_t set_bitrate(std::uint32_t bitrate) override;
     int32_t set_fps(std::uint32_t fps) override;

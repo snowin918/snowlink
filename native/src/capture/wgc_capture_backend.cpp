@@ -216,7 +216,7 @@ int32_t WgcCaptureBackend::start(const CaptureConfig& config) {
         auto impl = std::make_shared<Impl>();
         impl->cursor = capture_cursor_in_video_;
 
-        UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+        UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
         D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
         D3D_FEATURE_LEVEL level{};
         HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,

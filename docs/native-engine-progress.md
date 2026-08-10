@@ -66,11 +66,15 @@ The ctypes wrapper presents these as `NativeEngine.connect`, `create_offer`,
 `stop_stream`. SDP polling is control traffic only. Python never receives an
 `EncodedFrame`, NAL unit, RTP packet, or per-frame callback.
 
-The stream worker observes the latest capture texture, submits GPU preprocessing,
-wraps the resulting NV12 texture in a Media Foundation sample, drains compressed
-H.264 access units, and moves them into `Transport`. A dedicated sender worker
-packetizes and sends them. libdatachannel owns its ICE, DTLS, SRTP, and network
-threads. Shutdown first stops/joins the stream worker, flushes encoder/processor
+The stream worker observes the latest capture texture and submits GPU
+preprocessing. A dedicated encoder-input worker consumes a bounded two-texture
+newest-frame queue and wraps the NV12 texture in a Media Foundation sample, so a
+blocking driver `ProcessInput` call cannot stall capture/preprocessing. A dedicated
+encoder event/output worker drains asynchronous Media Foundation output into a
+bounded four-access-unit queue; the stream worker polls that queue without
+blocking frame submission and moves results into `Transport`. A dedicated sender
+worker packetizes and sends them. libdatachannel owns its ICE, DTLS, SRTP, and network
+threads. Shutdown first stops/joins the stream and encoder-output workers, flushes encoder/processor
 state, stops/joins the sender, closes the peer connection, and releases capture.
 The same object can initialize a fresh peer connection for reconnect.
 
@@ -159,10 +163,20 @@ This handles display-mode changes and disconnect/reconnect after topology
 settles. Device removal is reported separately. Clean stop signals and joins the
 worker; the bounded acquire timeout limits shutdown latency.
 
+Performance validation on an interactive NVIDIA system found that sharing the
+duplication device's immediate context with processing serialized
+`VideoProcessorBlt` for tens of milliseconds. DXGI now keeps duplication on a
+capture-only device and crosses two keyed-mutex shared textures to an isolated
+video-consumer device, then copies into a two-slot consumer-local pool. The
+1080p30 retest reached 30 process/encode FPS with zero encoder submission drops
+and approximately 0.012–0.017 ms steady preprocessing submission time.
+
 ## Resource ownership
 
-Each backend owns its D3D11 device/context and two default-usage publication
-textures. WGC pool surfaces and DXGI acquired surfaces are temporary producer
+WGC owns one D3D11 device/context and two default-usage publication textures.
+DXGI owns a duplication device plus an isolated video-consumer device; two
+keyed-mutex shared textures and two consumer-local publication textures bridge
+them entirely on the GPU. WGC pool surfaces and DXGI acquired surfaces are temporary producer
 resources. Before releasing them, Snowlink performs a GPU `CopyResource` into a
 publication slot. `get_latest_frame` returns an AddRef'd slot texture; the caller
 releases it. No CPU pixel copy is performed.
@@ -190,8 +204,10 @@ even. Target dimensions may be independent of capture dimensions (for example,
 2560x1440 or 3840x2160 to 1920x1080); zero target dimensions select the natural
 post-crop, post-rotation size.
 
-Two default-usage output textures and their video output views are allocated as a
-reusable pool. Input views are cached for the two capture publication textures.
+Eight default-usage output textures and their video output views are allocated as
+a bounded reusable ring. This covers normal asynchronous hardware-MFT surface
+retention without forcing `VideoProcessorBlt` to overwrite one of only two
+in-flight surfaces. Input views are cached for the two capture publication textures.
 The pool is recreated only when the D3D device, source size/format, crop size,
 target size, or output format changes. No staging resource, `Map`, upload, `Flush`,
 GPU query, `GetData`, or CPU wait exists in the normal preprocessing path.
@@ -337,6 +353,21 @@ Encoder-phase validation on 2026-08-09:
   `hardware=true` before periodic statistics.
 
 ## Remaining work
+
+The final performance and stability phase is **not complete**. Do not mark the
+migration complete until the interactive benchmark and failure matrix in
+`native-engine-benchmark.md` has actual results. The automation desktop cannot
+produce valid WGC/DXGI measurements.
+
+Static-screen tuning now avoids publishing DXGI pointer-only frames into the
+GPU video pipeline. Cursor metadata still updates through the separate cursor
+path, while full texture copy, preprocessing, and encode are skipped until the
+desktop changes. WGC continues to follow frame-pool arrival semantics because
+it does not expose DXGI dirty/move metadata.
+
+The consolidated architecture, queue ownership, runtime dependencies, and known
+limitations are documented in `native-engine-architecture.md`. The benchmark
+matrix and explicitly unmeasured comparison are in `native-engine-benchmark.md`.
 
 ## Native receiver, hardware decode, and D3D11 presentation
 

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <iomanip>
 #include <string>
 #include <thread>
 
@@ -39,20 +40,49 @@ int wmain(int argc, wchar_t** argv) {
     pc.target_width = static_cast<uint32_t>(width); pc.target_height = static_cast<uint32_t>(height);
     processor.configure(pc);
     snowlink::H264HardwareEncoder encoder; bool encoder_ready = false;
-    uint64_t last_id = 0, encoded = 0, bytes = 0, keys = 0, dropped = 0;
-    uint64_t last_capture = 0, last_encoded = 0, last_bytes = 0, last_keys = 0;
+    uint64_t last_id = 0, processed = 0, accepted = 0, encoded = 0, bytes = 0, keys = 0, dropped = 0;
+    uint64_t last_capture = 0, last_processed = 0, last_accepted = 0, last_encoded = 0;
+    uint64_t last_bytes = 0, last_keys = 0, last_dropped = 0;
+    double preprocess_ms_total = 0.0, encode_ms_total = 0.0;
+    double last_preprocess_ms = 0.0, last_encode_ms = 0.0;
     const auto start = std::chrono::steady_clock::now(); auto report = start + std::chrono::seconds(1);
+    const auto frame_interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(1.0 / static_cast<double>(fps)));
+    auto next_submit = start;
     FILETIME create{}, exit{}, kernel0{}, user0{}; GetProcessTimes(GetCurrentProcess(), &create, &exit, &kernel0, &user0);
     auto cpu_mark = start;
     while (std::chrono::steady_clock::now() - start < std::chrono::seconds(seconds)) {
+        if (encoder_ready) {
+            std::vector<snowlink::EncodedFrame> ready;
+            hr = encoder.poll(ready);
+            if (FAILED(hr)) { std::cerr << "pipeline failed stage=\"encoder output worker\" hresult=0x" << std::hex << std::uppercase << static_cast<uint32_t>(hr) << std::dec << " (" << hr << ")\n"; break; }
+            for (const auto& f : ready) { ++encoded; bytes += f.bytes.size(); if (f.keyframe) ++keys; }
+        }
         ID3D11Texture2D* capture_texture = nullptr; uint64_t id = 0; snowlink::FrameMetadata meta; snowlink::PointerState pointer;
         if (capture.get_latest_frame(&capture_texture, &id, &meta, &pointer) == 0) {
             if (id != last_id) {
-                last_id = id; snowlink::CaptureStatus cs{}; capture.get_capture_status(cs); pc.rotation = cs.rotation; processor.configure(pc);
+                const auto submit_now = std::chrono::steady_clock::now();
+                if (submit_now < next_submit) {
+                    capture_texture->Release();
+                    const auto remaining = next_submit - submit_now;
+                    std::this_thread::sleep_for(std::min(
+                        remaining, std::chrono::steady_clock::duration(std::chrono::milliseconds(1))));
+                    continue;
+                }
+                last_id = id;
+                next_submit += frame_interval;
+                if (next_submit <= submit_now) next_submit = submit_now + frame_interval;
+                snowlink::CaptureStatus cs{}; capture.get_capture_status(cs); pc.rotation = cs.rotation; processor.configure(pc);
+                const char* failed_stage = "gpu preprocess";
+                const auto preprocess_begin = std::chrono::steady_clock::now();
                 hr = processor.process_frame(capture_texture, id);
+                preprocess_ms_total += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - preprocess_begin).count();
+                if (SUCCEEDED(hr)) ++processed;
                 ID3D11Texture2D* nv12 = nullptr; uint64_t processed_id = 0;
                 if (!hr) hr = processor.get_latest_frame(&nv12, &processed_id);
                 if (!hr && !encoder_ready) {
+                    failed_stage = "encoder initialize";
                     ID3D11Device* device = nullptr; nv12->GetDevice(&device);
                     snowlink::EncoderSettings es{}; es.width = width; es.height = height; es.fps = fps; es.bitrate = bitrate;
                     es.keyframe_interval = static_cast<uint32_t>(fps * 2);
@@ -61,14 +91,26 @@ int wmain(int argc, wchar_t** argv) {
                     if (!hr) { encoder_ready = true; const auto& info = encoder.info(); std::cout << "selected encoder=\"" << info.encoder_name << "\" vendor=" << info.encoder_vendor << " hardware=" << (info.hardware_accelerated ? "true" : "false") << " codec=" << info.codec << " profile=" << info.profile << " " << info.width << "x" << info.height << " fps=" << info.fps << " bitrate=" << info.bitrate << "\n"; }
                 }
                 if (SUCCEEDED(hr) && encoder_ready) {
+                    failed_stage = "encoder input/output";
                     std::vector<snowlink::EncodedFrame> frames;
                     const uint64_t timestamp = std::chrono::duration_cast<std::chrono::duration<uint64_t, std::ratio<1, 10'000'000>>>(std::chrono::steady_clock::now() - start).count();
+                    const auto encode_begin = std::chrono::steady_clock::now();
                     hr = encoder.encode(nv12, timestamp, frames);
+                    encode_ms_total += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - encode_begin).count();
                     if (hr == S_FALSE) { ++dropped; hr = S_OK; }
+                    else if (SUCCEEDED(hr)) ++accepted;
                     for (const auto& f : frames) { ++encoded; bytes += f.bytes.size(); if (f.keyframe) ++keys; }
                 }
                 if (nv12) nv12->Release();
-                if (FAILED(hr)) { ++dropped; std::cerr << "pipeline failed: " << hr << "\n"; capture_texture->Release(); break; }
+                if (FAILED(hr)) {
+                    ++dropped;
+                    std::cerr << "pipeline failed stage=\"" << failed_stage << "\" hresult=0x"
+                              << std::hex << std::uppercase << static_cast<uint32_t>(hr)
+                              << std::dec << " (" << hr << ")\n";
+                    capture_texture->Release();
+                    break;
+                }
             }
             capture_texture->Release();
         }
@@ -78,11 +120,23 @@ int wmain(int argc, wchar_t** argv) {
             FILETIME k{}, u{}; GetProcessTimes(GetCurrentProcess(), &create, &exit, &k, &u);
             const double wall = std::chrono::duration<double>(now - cpu_mark).count();
             const double cpu = 100.0 * (cpu_seconds(kernel0, k) + cpu_seconds(user0, u)) / wall;
-            std::cout << "capture_fps=" << (stats.frames_captured - last_capture) << " encode_fps=" << (encoded - last_encoded)
+            const uint64_t processed_delta = processed - last_processed;
+            const uint64_t accepted_delta = accepted - last_accepted;
+            const double preprocess_delta = preprocess_ms_total - last_preprocess_ms;
+            const double encode_delta = encode_ms_total - last_encode_ms;
+            std::cout << "capture_fps=" << (stats.frames_captured - last_capture)
+                      << " process_fps=" << processed_delta
+                      << " queued_fps=" << accepted_delta
+                      << " encode_fps=" << (encoded - last_encoded)
                       << " encoded_mbps=" << ((bytes - last_bytes) * 8.0 / 1'000'000.0) << " keyframes=" << (keys - last_keys)
-                      << " dropped=" << dropped << " encoder=\"" << (encoder_ready ? encoder.info().encoder_name : "not selected")
+                      << " dropped_delta=" << (dropped - last_dropped) << " dropped_total=" << dropped
+                      << " preprocess_ms=" << (processed_delta ? preprocess_delta / processed_delta : 0.0)
+                      << " encode_call_ms=" << ((accepted_delta + dropped - last_dropped) ? encode_delta / (accepted_delta + dropped - last_dropped) : 0.0)
+                      << " encoder=\"" << (encoder_ready ? encoder.info().encoder_name : "not selected")
                       << "\" hardware=" << (encoder_ready && encoder.info().hardware_accelerated ? "true" : "false") << " cpu_percent=" << cpu << "\n";
-            last_capture = stats.frames_captured; last_encoded = encoded; last_bytes = bytes; last_keys = keys;
+            last_capture = stats.frames_captured; last_processed = processed; last_accepted = accepted;
+            last_encoded = encoded; last_bytes = bytes; last_keys = keys; last_dropped = dropped;
+            last_preprocess_ms = preprocess_ms_total; last_encode_ms = encode_ms_total;
             kernel0 = k; user0 = u; cpu_mark = now; report += std::chrono::seconds(1);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));

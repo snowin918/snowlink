@@ -289,7 +289,25 @@ void SnowlinkEngine::stream_loop(StreamConfig config) {
     std::uint64_t last_id = 0;
     bool encoder_ready = false;
     const auto epoch = std::chrono::steady_clock::now();
+    const auto frame_interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(1.0 / static_cast<double>(config.target_fps)));
+    auto next_submit = epoch;
+    auto publish_frames = [this](std::vector<EncodedFrame>& frames) {
+        for (auto& frame : frames) {
+            if (transport_->enqueue(std::move(frame)) == 0) {
+                std::lock_guard lock(stats_mutex_); ++stats_.frames_encoded;
+            }
+        }
+    };
     while (!stop_stream_requested_) {
+        if (encoder_ready) {
+            std::vector<EncodedFrame> ready;
+            const int32_t poll_result = encoder_->poll(ready);
+            publish_frames(ready);
+            if (poll_result < 0) {
+                std::lock_guard lock(stats_mutex_); ++stats_.frames_dropped;
+            }
+        }
         ID3D11Texture2D* capture_texture = nullptr;
         std::uint64_t frame_id = 0;
         if (capture_manager_->get_latest_frame(&capture_texture, &frame_id) != 0) {
@@ -301,7 +319,23 @@ void SnowlinkEngine::stream_loop(StreamConfig config) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_submit) {
+            // Do not consume this ID yet. Re-reading the latest slot at the
+            // deadline naturally coalesces any intervening capture frames.
+            capture_texture->Release();
+            const auto remaining = next_submit - now;
+            std::this_thread::sleep_for(std::min(
+                remaining, std::chrono::steady_clock::duration(std::chrono::milliseconds(1))));
+            continue;
+        }
         last_id = frame_id;
+        // Preserve cadence across ordinary Windows timer overshoot instead of
+        // scheduling from a late wake and accumulating that lateness forever.
+        // If the desktop was static for a whole interval, reset once rather
+        // than emitting a catch-up burst.
+        next_submit += frame_interval;
+        if (next_submit <= now) next_submit = now + frame_interval;
         CaptureStatus capture_status{};
         capture_manager_->get_capture_status(capture_status);
         GpuFrameProcessorConfig processor_config{};
@@ -331,17 +365,13 @@ void SnowlinkEngine::stream_loop(StreamConfig config) {
             std::vector<EncodedFrame> frames;
             const auto timestamp = std::chrono::duration_cast<
                 std::chrono::duration<std::uint64_t, std::ratio<1, 10'000'000>>>(
-                    std::chrono::steady_clock::now() - epoch).count();
+                    now - epoch).count();
             result = encoder_->encode(nv12, timestamp, frames);
             if (result == S_FALSE) {
                 std::lock_guard lock(stats_mutex_); ++stats_.frames_dropped;
                 result = 0;
             }
-            for (auto& frame : frames) {
-                if (transport_->enqueue(std::move(frame)) == 0) {
-                    std::lock_guard lock(stats_mutex_); ++stats_.frames_encoded;
-                }
-            }
+            publish_frames(frames);
         }
         if (nv12) nv12->Release();
         if (result < 0) {

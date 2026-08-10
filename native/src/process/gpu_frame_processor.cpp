@@ -14,6 +14,12 @@ using Microsoft::WRL::ComPtr;
 namespace snowlink {
 namespace {
 
+// Hardware MFTs retain submitted DXGI surfaces asynchronously. Two output
+// textures force the video processor to overwrite an in-flight surface and can
+// serialize the GPU to a few frames per second. Eight remains a small, bounded
+// VRAM allocation while covering normal hardware-encoder pipeline depth.
+constexpr std::size_t kOutputSurfaceCount = 8;
+
 DXGI_FORMAT to_dxgi(GpuPixelFormat format) noexcept {
     switch (format) {
     case GpuPixelFormat::Nv12: return DXGI_FORMAT_NV12;
@@ -49,8 +55,8 @@ public:
     ComPtr<ID3D11VideoContext1> video_context1;
     ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
     ComPtr<ID3D11VideoProcessor> processor;
-    std::array<ComPtr<ID3D11Texture2D>, 2> outputs;
-    std::array<ComPtr<ID3D11VideoProcessorOutputView>, 2> output_views;
+    std::array<ComPtr<ID3D11Texture2D>, kOutputSurfaceCount> outputs;
+    std::array<ComPtr<ID3D11VideoProcessorOutputView>, kOutputSurfaceCount> output_views;
     std::array<ComPtr<ID3D11Texture2D>, 2> input_textures;
     std::array<ComPtr<ID3D11VideoProcessorInputView>, 2> input_views;
     D3D11_TEXTURE2D_DESC source_desc{};
@@ -132,8 +138,8 @@ public:
         hr = new_video_device->CreateVideoProcessor(new_enumerator.Get(), 0, &new_processor);
         if (FAILED(hr)) return hr;
 
-        std::array<ComPtr<ID3D11Texture2D>, 2> new_outputs;
-        std::array<ComPtr<ID3D11VideoProcessorOutputView>, 2> new_views;
+        std::array<ComPtr<ID3D11Texture2D>, kOutputSurfaceCount> new_outputs;
+        std::array<ComPtr<ID3D11VideoProcessorOutputView>, kOutputSurfaceCount> new_views;
         D3D11_TEXTURE2D_DESC out{};
         out.Width = width; out.Height = height; out.MipLevels = 1; out.ArraySize = 1;
         out.Format = format; out.SampleDesc.Count = 1; out.Usage = D3D11_USAGE_DEFAULT;

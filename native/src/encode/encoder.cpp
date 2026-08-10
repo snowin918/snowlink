@@ -10,7 +10,13 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <limits>
+#include <mutex>
+#include <thread>
 
 using Microsoft::WRL::ComPtr;
 
@@ -66,7 +72,23 @@ public:
     bool com_initialized = false;
     bool initialized = false;
     bool asynchronous = false;
-    bool need_input = false;
+    std::atomic<std::uint32_t> input_requests{0};
+    std::atomic<bool> worker_stop{false};
+    std::atomic<bool> input_stop{false};
+    std::atomic<HRESULT> worker_error{S_OK};
+    std::thread output_worker;
+    std::thread input_worker;
+    std::mutex output_mutex;
+    std::deque<EncodedFrame> ready_frames;
+    static constexpr std::size_t kReadyFrameLimit = 4;
+    struct PendingInput {
+        ComPtr<ID3D11Texture2D> texture;
+        std::uint64_t timestamp = 0;
+    };
+    std::mutex input_mutex;
+    std::condition_variable input_wake;
+    std::deque<PendingInput> pending_inputs;
+    static constexpr std::size_t kPendingInputLimit = 2;
     std::uint64_t frame_duration = 0;
 
     HRESULT choose_transform(bool hardware_only, IMFActivate** selected, bool& hardware) {
@@ -150,20 +172,87 @@ public:
         }
     }
 
-    HRESULT pump_events(std::vector<EncodedFrame>& frames) {
-        if (!asynchronous) return S_OK;
-        for (;;) {
+    void publish(std::vector<EncodedFrame>& frames) {
+        if (frames.empty()) return;
+        std::lock_guard lock(output_mutex);
+        for (auto& frame : frames) {
+            while (ready_frames.size() >= kReadyFrameLimit) ready_frames.pop_front();
+            ready_frames.push_back(std::move(frame));
+        }
+    }
+
+    void take_ready(std::vector<EncodedFrame>& frames) {
+        std::lock_guard lock(output_mutex);
+        while (!ready_frames.empty()) {
+            frames.push_back(std::move(ready_frames.front()));
+            ready_frames.pop_front();
+        }
+    }
+
+    void run_output_worker() {
+        while (!worker_stop.load(std::memory_order_acquire)) {
             ComPtr<IMFMediaEvent> event;
             const HRESULT event_hr = event_generator->GetEvent(MF_EVENT_FLAG_NO_WAIT, &event);
-            if (event_hr == MF_E_NO_EVENTS_AVAILABLE) return S_OK;
-            if (FAILED(event_hr)) return event_hr;
+            if (event_hr == MF_E_NO_EVENTS_AVAILABLE) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            if (FAILED(event_hr)) { worker_error.store(event_hr); return; }
             MediaEventType type = MEUnknown; HRESULT status = S_OK;
             event->GetType(&type); event->GetStatus(&status);
-            if (FAILED(status)) return status;
-            if (type == METransformNeedInput) need_input = true;
-            else if (type == METransformHaveOutput) {
-                const HRESULT hr = drain(frames); if (FAILED(hr)) return hr;
+            if (FAILED(status)) { worker_error.store(status); return; }
+            if (type == METransformNeedInput) {
+                auto credits = input_requests.load(std::memory_order_relaxed);
+                while (credits != std::numeric_limits<std::uint32_t>::max() &&
+                       !input_requests.compare_exchange_weak(credits, credits + 1,
+                           std::memory_order_release, std::memory_order_relaxed)) {}
+                input_wake.notify_one();
+            } else if (type == METransformHaveOutput) {
+                std::vector<EncodedFrame> frames;
+                const HRESULT hr = drain(frames);
+                if (FAILED(hr)) { worker_error.store(hr); return; }
+                publish(frames);
             }
+        }
+    }
+
+    HRESULT submit_input(const PendingInput& pending) {
+        ComPtr<IMFMediaBuffer> buffer;
+        HRESULT hr = MFCreateDXGISurfaceBuffer(
+            __uuidof(ID3D11Texture2D), pending.texture.Get(), 0, FALSE, &buffer);
+        ComPtr<IMFSample> sample;
+        if (FAILED(hr) || FAILED(hr = MFCreateSample(&sample)) ||
+            FAILED(hr = sample->AddBuffer(buffer.Get())) ||
+            FAILED(hr = sample->SetSampleTime(static_cast<LONGLONG>(pending.timestamp))) ||
+            FAILED(hr = sample->SetSampleDuration(static_cast<LONGLONG>(frame_duration)))) return hr;
+        return transform->ProcessInput(input_stream, sample.Get(), 0);
+    }
+
+    void run_input_worker() {
+        while (!input_stop.load(std::memory_order_acquire)) {
+            PendingInput pending;
+            {
+                std::unique_lock lock(input_mutex);
+                input_wake.wait(lock, [&] {
+                    return input_stop.load(std::memory_order_acquire) ||
+                        (!pending_inputs.empty() && input_requests.load(std::memory_order_acquire) != 0);
+                });
+                if (input_stop.load(std::memory_order_acquire)) return;
+                pending = std::move(pending_inputs.back());
+                pending_inputs.clear();
+            }
+            HRESULT hr = submit_input(pending);
+            if (hr == MF_E_NOTACCEPTING) {
+                // The event credit and transform state raced. Restore the
+                // newest pending input and wait for the next credit.
+                std::lock_guard lock(input_mutex);
+                pending_inputs.clear();
+                pending_inputs.push_back(std::move(pending));
+                input_requests.store(0, std::memory_order_release);
+                continue;
+            }
+            if (FAILED(hr)) { worker_error.store(hr); return; }
+            input_requests.fetch_sub(1, std::memory_order_acq_rel);
         }
     }
 };
@@ -194,16 +283,25 @@ int32_t H264HardwareEncoder::initialize(ID3D11Device* device, const EncoderSetti
     if (FAILED(hr = activate->ActivateObject(IID_PPV_ARGS(&state_->transform)))) { shutdown(); return hr; }
     state_->asynchronous = SUCCEEDED(state_->transform.As(&state_->event_generator));
 
+    // An asynchronous MFT is locked immediately after activation.  It must be
+    // explicitly unlocked before ProcessMessage, type negotiation, or normal
+    // processing; otherwise hardware encoders return
+    // MF_E_TRANSFORM_ASYNC_LOCKED (0xC00D6D77).
+    ComPtr<IMFAttributes> attrs;
+    if (SUCCEEDED(state_->transform->GetAttributes(&attrs))) {
+        if (state_->asynchronous &&
+            FAILED(hr = attrs->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE))) {
+            shutdown();
+            return hr;
+        }
+        attrs->SetUINT32(MF_LOW_LATENCY, settings.low_latency ? TRUE : FALSE);
+    }
+
     if (hardware) {
         if (FAILED(hr = MFCreateDXGIDeviceManager(&state_->device_token, &state_->device_manager)) ||
             FAILED(hr = state_->device_manager->ResetDevice(device, state_->device_token)) ||
             FAILED(hr = state_->transform->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
                 reinterpret_cast<ULONG_PTR>(state_->device_manager.Get())))) { shutdown(); return hr; }
-    }
-    ComPtr<IMFAttributes> attrs;
-    if (SUCCEEDED(state_->transform->GetAttributes(&attrs))) {
-        attrs->SetUINT32(MF_LOW_LATENCY, settings.low_latency ? TRUE : FALSE);
-        attrs->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
     }
     state_->transform.As(&state_->codec_api);
     set_u32(state_->codec_api.Get(), CODECAPI_AVEncCommonRateControlMode,
@@ -218,6 +316,19 @@ int32_t H264HardwareEncoder::initialize(ID3D11Device* device, const EncoderSetti
     state_->frame_duration = 10'000'000ULL / settings.fps;
     state_->info.profile = "Main"; state_->info.width = settings.width; state_->info.height = settings.height;
     state_->info.fps = settings.fps; state_->info.bitrate = settings.bitrate; state_->initialized = true;
+    if (state_->asynchronous) {
+        state_->worker_stop.store(false);
+        state_->input_stop.store(false);
+        state_->worker_error.store(S_OK);
+        state_->output_worker = std::thread([state = state_.get()] { state->run_output_worker(); });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+        while (state_->input_requests.load(std::memory_order_acquire) == 0 &&
+               SUCCEEDED(state_->worker_error.load()) &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (FAILED(hr = state_->worker_error.load())) { shutdown(); return hr; }
+        state_->input_worker = std::thread([state = state_.get()] { state->run_input_worker(); });
+    }
     return S_OK;
 }
 
@@ -229,24 +340,28 @@ int32_t H264HardwareEncoder::encode(ID3D11Texture2D* texture, std::uint64_t time
         return E_INVALIDARG;
     ComPtr<ID3D11Device> input_device; texture->GetDevice(&input_device);
     if (input_device.Get() != state_->device.Get()) return E_INVALIDARG;
-    HRESULT hr = state_->pump_events(output); if (FAILED(hr)) return hr;
-    if (state_->asynchronous && !state_->need_input) return S_FALSE; // bounded latest-frame drop
-    ComPtr<IMFMediaBuffer> buffer; hr = MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), texture, 0, FALSE, &buffer);
-    ComPtr<IMFSample> sample;
-    if (FAILED(hr) || FAILED(hr = MFCreateSample(&sample)) || FAILED(hr = sample->AddBuffer(buffer.Get())) ||
-        FAILED(hr = sample->SetSampleTime(static_cast<LONGLONG>(timestamp))) ||
-        FAILED(hr = sample->SetSampleDuration(static_cast<LONGLONG>(state_->frame_duration)))) return hr;
-    hr = state_->transform->ProcessInput(state_->input_stream, sample.Get(), 0);
-    if (hr == MF_E_NOTACCEPTING) {
-        if (FAILED(hr = state_->drain(output))) return hr;
-        hr = state_->transform->ProcessInput(state_->input_stream, sample.Get(), 0);
-    }
-    if (FAILED(hr)) return hr;
+    state_->take_ready(output);
+    HRESULT hr = state_->worker_error.load(); if (FAILED(hr)) return hr;
     if (state_->asynchronous) {
-        state_->need_input = false;
-        return state_->pump_events(output);
+        State::PendingInput pending; pending.texture = texture; pending.timestamp = timestamp;
+        {
+            std::lock_guard lock(state_->input_mutex);
+            while (state_->pending_inputs.size() >= State::kPendingInputLimit)
+                state_->pending_inputs.pop_front();
+            state_->pending_inputs.push_back(std::move(pending));
+        }
+        state_->input_wake.notify_one();
+        return S_OK;
     }
+    State::PendingInput pending; pending.texture = texture; pending.timestamp = timestamp;
+    if (FAILED(hr = state_->submit_input(pending))) return hr;
     return state_->drain(output);
+}
+
+int32_t H264HardwareEncoder::poll(std::vector<EncodedFrame>& output) {
+    if (!state_->initialized) return MF_E_NOT_INITIALIZED;
+    state_->take_ready(output);
+    return state_->worker_error.load();
 }
 
 int32_t H264HardwareEncoder::request_keyframe() {
@@ -272,11 +387,19 @@ int32_t H264HardwareEncoder::set_fps(std::uint32_t fps) {
 
 void H264HardwareEncoder::shutdown() {
     if (!state_) return;
+    state_->input_stop.store(true, std::memory_order_release);
+    state_->input_wake.notify_all();
+    if (state_->input_worker.joinable()) state_->input_worker.join();
+    state_->worker_stop.store(true, std::memory_order_release);
+    if (state_->output_worker.joinable()) state_->output_worker.join();
     if (state_->transform) {
         state_->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
         state_->transform->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
         state_->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
     }
+    { std::lock_guard lock(state_->output_mutex); state_->ready_frames.clear(); }
+    { std::lock_guard lock(state_->input_mutex); state_->pending_inputs.clear(); }
+    state_->input_requests.store(0); state_->worker_error.store(S_OK);
     state_->codec_api.Reset(); state_->event_generator.Reset(); state_->transform.Reset(); state_->device_manager.Reset(); state_->device.Reset();
     state_->initialized = false;
     if (state_->mf_started) { MFShutdown(); state_->mf_started = false; }

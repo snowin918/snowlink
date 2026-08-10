@@ -106,6 +106,14 @@ class SettingsPage(QWidget):
             "packages in the build. Snowlink falls back to DXGI if WinRT is unavailable."
         )
         adv_form.addRow("Capture backend", self._backend)
+
+        self._media_engine = QComboBox()
+        self._media_engine.addItems(["legacy_python", "native_cpp"])
+        self._media_engine.setToolTip(
+            "Select the media engine lifetime. "
+            "native_cpp only probes the native DLL lifecycle today; share/view sessions still use legacy_python until the native pipeline is implemented."
+        )
+        adv_form.addRow("Media engine", self._media_engine)
         layout.addWidget(adv)
 
         row = QHBoxLayout()
@@ -326,6 +334,9 @@ class SettingsPage(QWidget):
         self._enable_audio.setChecked(bool(prefs.enable_audio))
         self._remote_ip.setText(prefs.last_remote_ip or "")
         self._source_ip.setText(prefs.last_source_ip or "")
+        me_idx = self._media_engine.findText(prefs.media_engine)
+        if me_idx >= 0:
+            self._media_engine.setCurrentIndex(me_idx)
         for i in range(self._monitor.count()):
             if self._monitor.itemData(i) == int(prefs.share_monitor):
                 self._monitor.setCurrentIndex(i)
@@ -358,6 +369,7 @@ class SettingsPage(QWidget):
             share_monitor=int(mon) if mon is not None else 0,
             audio_capture_device=str(audio),
             auto_start_share=self._auto_start.isChecked(),
+            media_engine=self._media_engine.currentText(),
             window_x=self._prefs.window_x,
             window_y=self._prefs.window_y,
             window_width=self._prefs.window_width,

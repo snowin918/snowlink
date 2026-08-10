@@ -4,6 +4,7 @@ signaling_port = 3847
 preset = "low"
 backend = "dxgi"
 enable_audio = true
+media_engine = "legacy_python"
 pairing_ttl_s = 180
 pairing_rate_limit_failures = 5
 pairing_rate_limit_window_s = 60

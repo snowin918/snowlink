@@ -29,6 +29,7 @@ class UserPreferences:
     share_monitor: int = 0
     audio_capture_device: str = "default"
     auto_start_share: bool = True
+    media_engine: str = "legacy_python"
     window_x: int | None = None
     window_y: int | None = None
     window_width: int = 700

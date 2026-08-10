@@ -57,6 +57,9 @@ experiments/**/*.json
 !experiments/README.md
 experiment-results/
 
+# Native build artifacts
+native/build/
+
 # Logs
 *.log
 logs/

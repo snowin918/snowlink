@@ -254,5 +254,7 @@ const char* snowlink_engine_last_error(void* engine_handle) noexcept {
         return "invalid handle";
     }
     auto* engine = static_cast<SnowlinkEngine*>(engine_handle);
-    return engine->last_error().c_str();
+    thread_local std::string error;
+    error = engine->last_error();
+    return error.c_str();
 }

@@ -22,7 +22,8 @@ class IVideoDecoder {
 public:
     virtual ~IVideoDecoder() = default;
     virtual int32_t initialize(ID3D11Device* device) = 0;
-    virtual int32_t decode(const EncodedFrame& frame, ID3D11Texture2D** texture) = 0;
+    virtual int32_t decode(const EncodedFrame& frame, ID3D11Texture2D** texture,
+                           std::uint32_t* subresource_index) = 0;
     virtual int32_t reset() = 0;
     virtual void shutdown() = 0;
     virtual const DecoderInfo& info() const noexcept = 0;
@@ -35,7 +36,8 @@ public:
     H264HardwareDecoder();
     ~H264HardwareDecoder() override;
     int32_t initialize(ID3D11Device* device) override;
-    int32_t decode(const EncodedFrame& frame, ID3D11Texture2D** texture) override;
+    int32_t decode(const EncodedFrame& frame, ID3D11Texture2D** texture,
+                   std::uint32_t* subresource_index) override;
     int32_t reset() override;
     void shutdown() override;
     const DecoderInfo& info() const noexcept override;

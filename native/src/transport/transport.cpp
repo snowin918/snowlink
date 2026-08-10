@@ -26,7 +26,7 @@ public:
     TransportConfig config;
     std::shared_ptr<rtc::PeerConnection> peer;
     std::shared_ptr<rtc::Track> track;
-    std::shared_ptr<rtc::DataChannel> cursor_motion, cursor_shape, input;
+    std::shared_ptr<rtc::DataChannel> video_data, cursor_motion, cursor_shape, input;
     std::shared_ptr<rtc::RtpPacketizationConfig> rtp;
     std::deque<EncodedFrame> queue;
     std::thread sender;
@@ -48,27 +48,23 @@ public:
     void run() {
         for (;;) {
             EncodedFrame frame;
-            std::shared_ptr<rtc::Track> output;
+            std::shared_ptr<rtc::DataChannel> output;
             {
                 std::unique_lock lock(mutex);
-                wake.wait(lock, [&] { return stopping || (!queue.empty() && track && track->isOpen()); });
+                wake.wait(lock, [&] { return stopping || (!queue.empty() && video_data && video_data->isOpen()); });
                 if (stopping) return;
                 frame = std::move(queue.front());
                 queue.pop_front();
                 stats.queue_depth = static_cast<std::uint32_t>(queue.size());
-                output = track;
+                output = video_data;
             }
             try {
                 // Media Foundation timestamps and WebRTC both have arbitrary epochs.
                 // Preserve the native 100 ns timestamp and convert only its rate.
-                rtc::FrameInfo info(std::chrono::duration<double>(frame.timestamp / 10'000'000.0));
-                const std::uint16_t sequence_before = rtp ? rtp->sequenceNumber : 0;
-                output->sendFrame(reinterpret_cast<const rtc::byte*>(frame.bytes.data()),
-                                  frame.bytes.size(), info);
+                output->send(reinterpret_cast<const rtc::byte*>(frame.bytes.data()), frame.bytes.size());
                 std::lock_guard lock(mutex);
                 stats.bytes_sent += frame.bytes.size();
-                if (rtp) stats.packets_sent += static_cast<std::uint16_t>(
-                    rtp->sequenceNumber - sequence_before);
+                ++stats.packets_sent;
                 update_rate_locked();
             } catch (...) {
                 std::lock_guard lock(mutex);
@@ -113,16 +109,17 @@ int32_t Transport::initialize_receiver(const TransportConfig& config, AccessUnit
         auto track=peer->addTrack(video);
         peer->onDataChannel([this](std::shared_ptr<rtc::DataChannel> channel){
             const auto label=channel->label();
-            if(label=="snowlink.cursor.motion"||label=="snowlink.cursor.shape"){
+            if(label=="snowlink.video"){
+                channel->onMessage([this](rtc::message_variant message){if(auto data=std::get_if<rtc::binary>(&message)){AccessUnitCallback cb=nullptr;void*ctx=nullptr;{std::lock_guard lock(state_->mutex);cb=state_->access_unit_callback;ctx=state_->access_unit_context;}if(cb&&!data->empty())cb(ctx,reinterpret_cast<const uint8_t*>(data->data()),data->size(),static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()/100));}});
+                std::lock_guard lock(state_->mutex);state_->video_data=channel;
+            } else if(label=="snowlink.cursor.motion"||label=="snowlink.cursor.shape"){
                 channel->onMessage([this](rtc::message_variant message){if(auto data=std::get_if<rtc::binary>(&message)){ControlCallback cb=nullptr;void*ctx=nullptr;{std::lock_guard lock(state_->mutex);cb=state_->cursor_callback;ctx=state_->control_context;}if(cb&&!data->empty())cb(ctx,reinterpret_cast<const uint8_t*>(data->data()),data->size());}});
                 std::lock_guard lock(state_->mutex);if(label=="snowlink.cursor.motion")state_->cursor_motion=channel;else state_->cursor_shape=channel;
             } else if(label=="snowlink.input") { std::lock_guard lock(state_->mutex);state_->input=channel; }
         });
-        // Incoming handlers run from the tail of the chain back to its root.
-        // RTP/RTCP classification must therefore run first, followed by H.264
-        // depacketization.  The former order reconstructed H.264 and then fed
-        // it to RtcpReceivingSession as if it were an RTP packet, which dropped
-        // every received video frame.
+        // Incoming traversal is tail-to-root: classify RTP/RTCP first, then
+        // reconstruct H.264 access units. RTCP must not leak into the video
+        // callback as a binary access unit.
         auto depacketizer=std::make_shared<rtc::H264RtpDepacketizer>(
             rtc::NalUnit::Separator::StartSequence);
         depacketizer->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
@@ -175,6 +172,8 @@ int32_t Transport::initialize(const TransportConfig& config, KeyframeRequest cal
         const auto ssrc = random_u32();
         video.addSSRC(ssrc, "snowlink-video", "snowlink-stream", "snowlink-video");
         auto track = peer->addTrack(video);
+        rtc::DataChannelInit video_init;video_init.reliability.unordered=true;video_init.reliability.maxRetransmits=0;
+        auto video_data=peer->createDataChannel("snowlink.video",video_init);
         rtc::DataChannelInit motion_init;motion_init.reliability.unordered=true;motion_init.reliability.maxRetransmits=0;
         auto cursor_motion=peer->createDataChannel("snowlink.cursor.motion",motion_init);
         auto cursor_shape=peer->createDataChannel("snowlink.cursor.shape");
@@ -199,6 +198,7 @@ int32_t Transport::initialize(const TransportConfig& config, KeyframeRequest cal
         }));
         track->setMediaHandler(packetizer);
         track->onOpen([this] { state_->wake.notify_all(); });
+        video_data->onOpen([this] { state_->wake.notify_all(); });
         peer->onLocalDescription([this](rtc::Description description) {
             std::lock_guard lock(state_->mutex);
             state_->local_type = description.typeString();
@@ -219,7 +219,7 @@ int32_t Transport::initialize(const TransportConfig& config, KeyframeRequest cal
             state_->peer = std::move(peer);
             state_->track = std::move(track);
             state_->rtp = std::move(rtp);
-            state_->cursor_motion=std::move(cursor_motion);state_->cursor_shape=std::move(cursor_shape);state_->input=std::move(input);
+            state_->video_data=std::move(video_data);state_->cursor_motion=std::move(cursor_motion);state_->cursor_shape=std::move(cursor_shape);state_->input=std::move(input);
             state_->keyframe_callback = callback;
             state_->keyframe_context = context;
             state_->input_callback=input_callback;state_->control_context=control_context;
@@ -335,7 +335,7 @@ int32_t Transport::shutdown() {
     if (state_->sender.joinable()) state_->sender.join();
     if (peer) peer->close();
     std::lock_guard lock(state_->mutex);
-    state_->track.reset(); state_->rtp.reset();state_->cursor_motion.reset();state_->cursor_shape.reset();state_->input.reset(); state_->peer.reset();
+    state_->track.reset(); state_->rtp.reset();state_->video_data.reset();state_->cursor_motion.reset();state_->cursor_shape.reset();state_->input.reset(); state_->peer.reset();
     state_->access_unit_callback=nullptr; state_->access_unit_context=nullptr;
     state_->local_ready = false; state_->gathering_complete = false; state_->stats.connected = false;
     return 0;

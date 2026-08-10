@@ -1,4 +1,5 @@
 #include "snowlink/encoder.h"
+#include "snowlink/h264_bitstream.h"
 
 #include <Windows.h>
 #include <strmif.h>
@@ -53,6 +54,16 @@ HRESULT set_bool(ICodecAPI* api, const GUID& key, bool value) {
     const HRESULT hr = api->SetValue(&key, &v); VariantClear(&v); return hr;
 }
 
+class ComApartment final {
+public:
+    ComApartment() noexcept : result_(CoInitializeEx(nullptr, COINIT_MULTITHREADED)) {}
+    ~ComApartment() { if (SUCCEEDED(result_)) CoUninitialize(); }
+    HRESULT result() const noexcept { return result_; }
+
+private:
+    HRESULT result_;
+};
+
 } // namespace
 
 class H264HardwareEncoder::State {
@@ -68,6 +79,7 @@ public:
     DWORD input_stream = 0;
     DWORD output_stream = 0;
     MFT_OUTPUT_STREAM_INFO output_info{};
+    std::vector<std::uint8_t> sequence_header;
     bool mf_started = false;
     bool com_initialized = false;
     bool initialized = false;
@@ -90,6 +102,27 @@ public:
     std::deque<PendingInput> pending_inputs;
     static constexpr std::size_t kPendingInputLimit = 2;
     std::uint64_t frame_duration = 0;
+
+    HRESULT refresh_sequence_header() {
+        ComPtr<IMFMediaType> current_type;
+        HRESULT hr = transform->GetOutputCurrentType(output_stream, &current_type);
+        if (FAILED(hr)) return hr;
+        UINT32 size = 0;
+        hr = current_type->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &size);
+        if (hr == MF_E_ATTRIBUTENOTFOUND || size == 0) return S_FALSE;
+        if (FAILED(hr)) return hr;
+        std::vector<std::uint8_t> value(size);
+        UINT32 written = 0;
+        hr = current_type->GetBlob(
+            MF_MT_MPEG_SEQUENCE_HEADER, value.data(), size, &written);
+        if (FAILED(hr)) return hr;
+        value.resize(written);
+        if (!normalize_h264_sequence_header(value)) return MF_E_INVALIDMEDIATYPE;
+        const auto info = inspect_h264_access_unit(value);
+        if (!info.has_sps || !info.has_pps) return MF_E_INVALIDMEDIATYPE;
+        sequence_header = std::move(value);
+        return S_OK;
+    }
 
     HRESULT choose_transform(bool hardware_only, IMFActivate** selected, bool& hardware) {
         MFT_REGISTER_TYPE_INFO input{MFMediaType_Video, MFVideoFormat_NV12};
@@ -137,7 +170,13 @@ public:
             FAILED(hr = MFSetAttributeRatio(in_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1)) ||
             FAILED(hr = in_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive)) ||
             FAILED(hr = transform->SetInputType(input_stream, in_type.Get(), 0))) return hr;
-        return transform->GetOutputStreamInfo(output_stream, &output_info);
+        hr = transform->GetOutputStreamInfo(output_stream, &output_info);
+        if (FAILED(hr)) return hr;
+        // Some encoder MFTs publish this immediately; others add it only after
+        // producing their first output sample. drain() retries in the latter
+        // case.
+        (void)refresh_sequence_header();
+        return S_OK;
     }
 
     HRESULT drain(std::vector<EncodedFrame>& frames) {
@@ -167,7 +206,12 @@ public:
             LONGLONG time = 0; if (SUCCEEDED(produced->GetSampleTime(&time))) frame.timestamp = static_cast<uint64_t>(time);
             UINT32 clean = FALSE; frame.keyframe = SUCCEEDED(produced->GetUINT32(MFSampleExtension_CleanPoint, &clean)) && clean;
             frame.bytes.assign(bytes, bytes + length);
-            contiguous->Unlock(); frames.push_back(std::move(frame));
+            contiguous->Unlock();
+            if (sequence_header.empty() || frame.keyframe) {
+                (void)refresh_sequence_header();
+            }
+            prepare_h264_access_unit(frame, sequence_header);
+            frames.push_back(std::move(frame));
             if (!(status & MFT_OUTPUT_DATA_BUFFER_INCOMPLETE)) return S_OK;
         }
     }
@@ -190,6 +234,11 @@ public:
     }
 
     void run_output_worker() {
+        ComApartment apartment;
+        if (FAILED(apartment.result()) && apartment.result() != RPC_E_CHANGED_MODE) {
+            worker_error.store(apartment.result());
+            return;
+        }
         while (!worker_stop.load(std::memory_order_acquire)) {
             ComPtr<IMFMediaEvent> event;
             const HRESULT event_hr = event_generator->GetEvent(MF_EVENT_FLAG_NO_WAIT, &event);
@@ -229,6 +278,11 @@ public:
     }
 
     void run_input_worker() {
+        ComApartment apartment;
+        if (FAILED(apartment.result()) && apartment.result() != RPC_E_CHANGED_MODE) {
+            worker_error.store(apartment.result());
+            return;
+        }
         while (!input_stop.load(std::memory_order_acquire)) {
             PendingInput pending;
             {
@@ -262,25 +316,48 @@ H264HardwareEncoder::~H264HardwareEncoder() { shutdown(); }
 
 int32_t H264HardwareEncoder::initialize(ID3D11Device* device, const EncoderSettings& settings) {
     shutdown();
+    state_->info.failure_stage = "validate settings";
     if (!device || !settings.width || !settings.height || !settings.fps || !settings.bitrate ||
         (settings.width & 1) || (settings.height & 1)) return E_INVALIDARG;
     state_->settings = settings; state_->device = device;
+    state_->info.failure_stage = "initialize COM";
     HRESULT com_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (SUCCEEDED(com_hr)) state_->com_initialized = true;
     else if (com_hr != RPC_E_CHANGED_MODE) return com_hr;
+    state_->info.failure_stage = "start Media Foundation";
     HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_LITE); if (FAILED(hr)) { shutdown(); return hr; }
     state_->mf_started = true;
     ComPtr<IMFActivate> activate; bool hardware = false;
+    state_->info.failure_stage = "discover H.264 encoder";
     hr = state_->choose_transform(true, &activate, hardware);
     if (FAILED(hr) && settings.hardware_preference == HardwarePreference::AllowSoftwareFallback)
         hr = state_->choose_transform(false, &activate, hardware);
     if (FAILED(hr)) { shutdown(); return hr; }
-    WCHAR* friendly = nullptr; UINT32 chars = 0;
-    activate->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &friendly, &chars);
-    state_->info.encoder_name = narrow(friendly); CoTaskMemFree(friendly);
-    state_->info.encoder_vendor = vendor_from_name(state_->info.encoder_name);
-    state_->info.hardware_accelerated = hardware;
-    if (FAILED(hr = activate->ActivateObject(IID_PPV_ARGS(&state_->transform)))) { shutdown(); return hr; }
+    auto record_encoder = [this, &hardware](IMFActivate* candidate) {
+        WCHAR* friendly = nullptr; UINT32 chars = 0;
+        candidate->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &friendly, &chars);
+        state_->info.encoder_name = narrow(friendly); CoTaskMemFree(friendly);
+        state_->info.encoder_vendor = vendor_from_name(state_->info.encoder_name);
+        state_->info.hardware_accelerated = hardware;
+    };
+    record_encoder(activate.Get());
+    state_->info.failure_stage = "activate H.264 encoder";
+    hr = activate->ActivateObject(IID_PPV_ARGS(&state_->transform));
+    if (FAILED(hr) && hardware &&
+        settings.hardware_preference == HardwarePreference::AllowSoftwareFallback) {
+        // A vendor MFT can remain registered after its driver/runtime becomes
+        // unusable. Do not let that stale first entry prevent streaming.
+        activate.Reset();
+        hardware = false;
+        state_->info.failure_stage = "discover software H.264 encoder";
+        hr = state_->choose_transform(false, &activate, hardware);
+        if (SUCCEEDED(hr)) {
+            record_encoder(activate.Get());
+            state_->info.failure_stage = "activate software H.264 encoder";
+            hr = activate->ActivateObject(IID_PPV_ARGS(&state_->transform));
+        }
+    }
+    if (FAILED(hr)) { shutdown(); return hr; }
     state_->asynchronous = SUCCEEDED(state_->transform.As(&state_->event_generator));
 
     // An asynchronous MFT is locked immediately after activation.  It must be
@@ -288,6 +365,7 @@ int32_t H264HardwareEncoder::initialize(ID3D11Device* device, const EncoderSetti
     // processing; otherwise hardware encoders return
     // MF_E_TRANSFORM_ASYNC_LOCKED (0xC00D6D77).
     ComPtr<IMFAttributes> attrs;
+    state_->info.failure_stage = "unlock asynchronous encoder";
     if (SUCCEEDED(state_->transform->GetAttributes(&attrs))) {
         if (state_->asynchronous &&
             FAILED(hr = attrs->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE))) {
@@ -298,11 +376,13 @@ int32_t H264HardwareEncoder::initialize(ID3D11Device* device, const EncoderSetti
     }
 
     if (hardware) {
+        state_->info.failure_stage = "attach D3D11 device manager";
         if (FAILED(hr = MFCreateDXGIDeviceManager(&state_->device_token, &state_->device_manager)) ||
             FAILED(hr = state_->device_manager->ResetDevice(device, state_->device_token)) ||
             FAILED(hr = state_->transform->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
                 reinterpret_cast<ULONG_PTR>(state_->device_manager.Get())))) { shutdown(); return hr; }
     }
+    state_->info.failure_stage = "configure codec controls";
     state_->transform.As(&state_->codec_api);
     set_u32(state_->codec_api.Get(), CODECAPI_AVEncCommonRateControlMode,
             settings.rate_control == RateControlMode::Cbr ? eAVEncCommonRateControlMode_CBR : eAVEncCommonRateControlMode_UnconstrainedVBR);
@@ -310,9 +390,16 @@ int32_t H264HardwareEncoder::initialize(ID3D11Device* device, const EncoderSetti
     set_u32(state_->codec_api.Get(), CODECAPI_AVEncMPVGOPSize, settings.keyframe_interval);
     set_u32(state_->codec_api.Get(), CODECAPI_AVEncVideoMaxNumRefFrame, 1);
     set_bool(state_->codec_api.Get(), CODECAPI_AVLowLatencyMode, settings.low_latency);
-    if (FAILED(hr = state_->configure_types()) ||
-        FAILED(hr = state_->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)) ||
-        FAILED(hr = state_->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0))) { shutdown(); return hr; }
+    state_->info.failure_stage = "configure H.264 media types";
+    if (FAILED(hr = state_->configure_types())) { shutdown(); return hr; }
+    state_->info.failure_stage = "begin H.264 streaming";
+    if (FAILED(hr = state_->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0))) {
+        shutdown(); return hr;
+    }
+    state_->info.failure_stage = "start H.264 stream";
+    if (FAILED(hr = state_->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0))) {
+        shutdown(); return hr;
+    }
     state_->frame_duration = 10'000'000ULL / settings.fps;
     state_->info.profile = "Main"; state_->info.width = settings.width; state_->info.height = settings.height;
     state_->info.fps = settings.fps; state_->info.bitrate = settings.bitrate; state_->initialized = true;
@@ -329,6 +416,7 @@ int32_t H264HardwareEncoder::initialize(ID3D11Device* device, const EncoderSetti
         if (FAILED(hr = state_->worker_error.load())) { shutdown(); return hr; }
         state_->input_worker = std::thread([state = state_.get()] { state->run_input_worker(); });
     }
+    state_->info.failure_stage.clear();
     return S_OK;
 }
 
@@ -399,6 +487,7 @@ void H264HardwareEncoder::shutdown() {
     }
     { std::lock_guard lock(state_->output_mutex); state_->ready_frames.clear(); }
     { std::lock_guard lock(state_->input_mutex); state_->pending_inputs.clear(); }
+    state_->sequence_header.clear();
     state_->input_requests.store(0); state_->worker_error.store(S_OK);
     state_->codec_api.Reset(); state_->event_generator.Reset(); state_->transform.Reset(); state_->device_manager.Reset(); state_->device.Reset();
     state_->initialized = false;

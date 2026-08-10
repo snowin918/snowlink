@@ -25,6 +25,7 @@ add_library(snowlink_engine SHARED
     src/c_api.cpp
     src/capture/capture_manager.cpp
     src/encode/encoder.cpp
+    src/encode/h264_bitstream.cpp
     src/decode/decoder.cpp
     src/render/renderer.cpp
     src/transport/transport.cpp
@@ -108,7 +109,10 @@ endif()
 
 option(SNOWLINK_BUILD_TRANSPORT_TEST "Build native H.264 RTP packet tests" ON)
 if (SNOWLINK_BUILD_TRANSPORT_TEST)
-    add_executable(snowlink_transport_packet_test tools/transport_packet_test.cpp)
+    add_executable(snowlink_transport_packet_test
+        tools/transport_packet_test.cpp
+        src/encode/h264_bitstream.cpp)
+    target_include_directories(snowlink_transport_packet_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(snowlink_transport_packet_test PRIVATE LibDataChannel::LibDataChannelStatic)
     set_target_properties(snowlink_transport_packet_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin)
     if (MSVC)
@@ -132,7 +136,8 @@ if (SNOWLINK_BUILD_ENCODER_BENCHMARK)
         src/capture/wgc_capture_backend.cpp
         src/capture/dxgi_capture_backend.cpp
         src/process/gpu_frame_processor.cpp
-        src/encode/encoder.cpp)
+        src/encode/encoder.cpp
+        src/encode/h264_bitstream.cpp)
     target_include_directories(snowlink_encoder_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_definitions(snowlink_encoder_benchmark PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(snowlink_encoder_benchmark PRIVATE d3d11 dxgi windowsapp mf mfplat mfreadwrite mfuuid oleaut32)

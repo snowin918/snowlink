@@ -63,7 +63,7 @@ public:
 
     int32_t get_stats(EngineStats& out_stats) const;
     EngineState get_state() const noexcept;
-    const std::string& last_error() const noexcept;
+    std::string last_error() const noexcept;
 
 private:
     static void transport_keyframe_request(void* context);
@@ -77,6 +77,7 @@ private:
     EngineState state_;
     EngineStats stats_;
     std::string last_error_;
+    mutable std::mutex error_mutex_;
 
     std::unique_ptr<CaptureManager> capture_manager_;
     std::unique_ptr<IVideoEncoder> encoder_;

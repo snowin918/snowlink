@@ -30,25 +30,45 @@ class NativeVideoSurface(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._legacy_pixmap: QPixmap | None = None
+        self._native_painting = True
+        # D3D presents directly into this widget's HWND.  Keep the widget out
+        # of Qt's backing store and suppress automatic background/style paints,
+        # which can otherwise cover a freshly presented swap-chain buffer.
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAutoFillBackground(False)
+        self.setUpdatesEnabled(False)
 
     def setPixmap(self, pixmap: QPixmap) -> None:  # noqa: N802
-        """Paint only legacy Python frames; native rendering never calls this."""
+        """Switch to Qt painting for a legacy Python frame."""
+        if self._native_painting:
+            self._native_painting = False
+            self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+            self.setUpdatesEnabled(True)
         self._legacy_pixmap = pixmap
         self.update()
 
     def paintEvent(self, event: Any) -> None:  # noqa: N802
-        if self._legacy_pixmap is None:
-            return super().paintEvent(event)
+        if self._native_painting:
+            # The native renderer owns every pixel in this mode.  In
+            # particular, do not call QWidget.paintEvent: application QSS
+            # would paint the light QWidget background over D3D output.
+            event.accept()
+            return
         painter = QPainter(self)
         painter.fillRect(self.rect(), Qt.GlobalColor.black)
-        scaled = self._legacy_pixmap.scaled(
-            self.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.FastTransformation,
-        )
-        painter.drawPixmap(
-            (self.width() - scaled.width()) // 2, (self.height() - scaled.height()) // 2, scaled
-        )
+        if self._legacy_pixmap is not None:
+            scaled = self._legacy_pixmap.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
+            painter.drawPixmap(
+                (self.width() - scaled.width()) // 2,
+                (self.height() - scaled.height()) // 2,
+                scaled,
+            )
 
     def mouseMoveEvent(self, event: Any) -> None:  # noqa: N802
         p = event.position()
@@ -210,10 +230,8 @@ class ViewSessionWindow(QWidget):
             "background:#ECEFF1; color:#546E7A; border-radius:12px; border:1px solid #BBDEFB;"
         )
         layout.addWidget(placeholder, stretch=1)
-        self._video = NativeVideoSurface()
-        self._video.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self._video = NativeVideoSurface(self)
         self._video.setMinimumHeight(240)
-        self._video.setStyleSheet("background:#000;")
         layout.replaceWidget(placeholder, self._video)
         placeholder.deleteLater()
 

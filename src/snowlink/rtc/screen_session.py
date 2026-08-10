@@ -380,18 +380,41 @@ async def run_native_screen_share(
             state.phase = "sharing"
             state.sharing_active = True
             state.detail = f"Sharing with native H.264 ({border_note})"
+            last_media_log = 0.0
             while not stop.is_set():
                 status = engine.get_capture_status()
                 if status.device_lost:
                     raise RuntimeError("Capture device was lost")
                 if status.access_lost and not status.capture_active:
                     raise RuntimeError("Capture was lost or the display was disconnected")
-                state.frames = engine.get_stats().frames_encoded
+                native_stats = engine.get_stats()
+                state.frames = native_stats.frames_encoded
                 state.stats = _native_session_stats(
                     engine,
                     width=status.width or config.width,
                     height=status.height or config.height,
                 )
+                now = time.monotonic()
+                if now - last_media_log >= 5.0:
+                    logger.info(
+                        "Native sender heartbeat: captured=%d capture_fps=%.1f encoded=%d "
+                        "encode_fps=%.1f packets_sent=%d send_mbps=%.2f queue=%d "
+                        "drops=%d transport_errors=%d capture_active=%s size=%dx%d last_error=%s",
+                        native_stats.frames_captured,
+                        native_stats.capture_fps,
+                        native_stats.frames_encoded,
+                        native_stats.encode_fps,
+                        native_stats.packets_sent,
+                        native_stats.send_bitrate / 1_000_000.0,
+                        native_stats.transport_queue_depth,
+                        native_stats.frames_dropped + native_stats.transport_frames_dropped,
+                        native_stats.transport_errors,
+                        status.capture_active,
+                        status.width,
+                        status.height,
+                        engine.last_error() or "none",
+                    )
+                    last_media_log = now
                 _notify(on_state, state)
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=1.0)
@@ -526,7 +549,7 @@ async def run_native_screen_view(
                 logger.info(
                     "Native viewer heartbeat: decoded=%d decode_fps=%.1f render_fps=%.1f "
                     "drops=%d transport_errors=%d rtt_ms=%.1f decoder_poll_ms=%.2f "
-                    "stats_poll_ms=%.2f decoder=%s size=%dx%d",
+                    "stats_poll_ms=%.2f decoder=%s size=%dx%d last_error=%s",
                     raw_stats.frames_decoded,
                     raw_stats.decode_fps,
                     raw_stats.render_fps,
@@ -538,6 +561,7 @@ async def run_native_screen_view(
                     decoder["decoder_name"] or "unavailable",
                     size[0],
                     size[1],
+                    engine.last_error() or "none",
                 )
                 next_view_log = now + 5.0
             _notify(on_state, state)

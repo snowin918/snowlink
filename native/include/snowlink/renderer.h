@@ -12,7 +12,8 @@ class Renderer {
 public:
     Renderer(); ~Renderer();
     int32_t initialize(HWND window, ID3D11Device* device);
-    int32_t submit(ID3D11Texture2D* texture, std::uint64_t frame_id);
+    int32_t submit(ID3D11Texture2D* texture, std::uint32_t subresource_index,
+                   std::uint64_t frame_id);
     int32_t resize();
     int32_t set_visible(bool visible);
     int32_t get_stats(RendererStats& stats) const;

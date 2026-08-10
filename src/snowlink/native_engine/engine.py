@@ -437,12 +437,19 @@ class NativeEngine:
             )
         )
 
-    def start_receiver(self, *, hwnd: int, bind_address: str = "") -> None:
+    def start_receiver(
+        self,
+        *,
+        hwnd: int,
+        bind_address: str = "",
+        port_min: int = NATIVE_MEDIA_PORT_MIN,
+        port_max: int = NATIVE_MEDIA_PORT_MAX,
+    ) -> None:
         self._ensure_alive()
         cfg = _TransportConfig(
             bind_address.encode(),
-            NATIVE_MEDIA_PORT_MIN,
-            NATIVE_MEDIA_PORT_MAX,
+            port_min,
+            port_max,
             1200,
             2,
             256,

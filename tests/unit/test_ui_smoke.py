@@ -188,3 +188,59 @@ def test_native_fullscreen_preserves_video_hwnd() -> None:
     assert window.native_video_handle == hwnd
     window.close()
     window.deleteLater()
+
+
+def test_native_video_surface_opts_out_of_qt_backing_store_painting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPaintEvent
+
+    from snowlink.ui.styles import APP_STYLESHEET
+    from snowlink.ui.windows import NativeVideoSurface
+
+    app = _ensure_qapp()
+    previous_stylesheet = app.styleSheet()
+    app.setStyleSheet(APP_STYLESHEET)
+    surface = NativeVideoSurface()
+    surface.ensurePolished()
+    assert surface.testAttribute(Qt.WidgetAttribute.WA_NativeWindow)
+    assert surface.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+    assert surface.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+    assert not surface.autoFillBackground()
+    assert not surface.updatesEnabled()
+
+    # Native mode owns the HWND and accepts Qt paint events without painting a
+    # QWidget/QSS background over the swap chain.
+    monkeypatch.setattr(
+        "snowlink.ui.windows.QPainter",
+        lambda *_args: pytest.fail("native paint event constructed a Qt painter"),
+    )
+    event = QPaintEvent(surface.rect())
+    surface.paintEvent(event)
+    assert event.isAccepted()
+    surface.deleteLater()
+    app.setStyleSheet(previous_stylesheet)
+
+
+def test_native_video_surface_switches_back_to_legacy_qpixmap_painting() -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QPixmap
+
+    from snowlink.ui.windows import NativeVideoSurface
+
+    app = _ensure_qapp()
+    surface = NativeVideoSurface()
+    surface.resize(80, 60)
+    pixmap = QPixmap(8, 6)
+    pixmap.fill(QColor(220, 30, 40))
+    surface.setPixmap(pixmap)
+
+    assert not surface.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+    assert surface.updatesEnabled()
+    surface.show()
+    app.processEvents()
+    center = surface.grab().toImage().pixelColor(40, 30)
+    assert (center.red(), center.green(), center.blue()) == (220, 30, 40)
+    surface.close()
+    surface.deleteLater()

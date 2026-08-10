@@ -8,8 +8,10 @@
 #include "snowlink/cursor.h"
 #include "snowlink/input.h"
 #include "snowlink/gpu_frame_processor.h"
+#include "snowlink/h264_bitstream.h"
 
 #include <chrono>
+#include <cstdio>
 #include <vector>
 #include <utility>
 #include <d3d11.h>
@@ -203,15 +205,26 @@ int32_t SnowlinkEngine::get_decoder_info(std::string& name,bool& hw,std::uint32_
 
 void SnowlinkEngine::transport_access_unit(void* context,const std::uint8_t* data,std::size_t size,std::uint64_t timestamp){
     if(!context||!data||!size)return;auto*self=static_cast<SnowlinkEngine*>(context);EncodedFrame frame;frame.timestamp=timestamp;frame.bytes.assign(data,data+size);
-    for(size_t i=0;i+4<size;++i)if(data[i]==0&&data[i+1]==0&&((data[i+2]==1&&((data[i+3]&31)==5))||(data[i+2]==0&&data[i+3]==1&&((data[i+4]&31)==5)))){frame.keyframe=true;break;}
+    frame.keyframe=inspect_h264_access_unit(frame.bytes).has_idr;
     std::lock_guard lock(self->receive_mutex_);if(self->receive_queue_.size()>=2){self->receive_queue_.pop_front();++self->stats_.frames_dropped;}self->receive_queue_.push_back(std::move(frame));self->receive_wake_.notify_one();
 }
 void SnowlinkEngine::transport_cursor_message(void* context,const std::uint8_t*data,std::size_t size){if(!context)return;CursorState s;CursorShape shape;if(decode_cursor_message(data,size,&s,&shape)){auto*self=static_cast<SnowlinkEngine*>(context);if(size>1&&data[1]==1)self->cursor_->receive_state(s);else self->cursor_->receive_shape(shape);}}
 void SnowlinkEngine::transport_input_message(void* context,const std::uint8_t*data,std::size_t size){if(!context)return;RemoteInputEvent event;if(decode_input_event(data,size,event))static_cast<SnowlinkEngine*>(context)->input_->inject(event);}
 void SnowlinkEngine::receive_loop(){auto last_keyframe_request=std::chrono::steady_clock::time_point{};while(!stop_receive_requested_){EncodedFrame frame;{std::unique_lock lock(receive_mutex_);receive_wake_.wait(lock,[&]{return stop_receive_requested_||!receive_queue_.empty();});if(stop_receive_requested_)break;frame=std::move(receive_queue_.back());receive_queue_.clear();}
-    if(awaiting_keyframe_&&!frame.keyframe){const auto now=std::chrono::steady_clock::now();if(last_keyframe_request.time_since_epoch().count()==0||now-last_keyframe_request>=std::chrono::milliseconds(500)){transport_->request_remote_keyframe();last_keyframe_request=now;}std::lock_guard lock(stats_mutex_);++stats_.frames_dropped;continue;}ID3D11Texture2D* texture=nullptr;int32_t result=decoder_->decode(frame,&texture);
-    if(result<0){awaiting_keyframe_=true;decoder_->reset();transport_->request_remote_keyframe();std::lock_guard lock(stats_mutex_);++stats_.frames_dropped;continue;}
-    if(frame.keyframe)awaiting_keyframe_=false;if(texture){D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);cursor_->update_source_size(d.Width,d.Height);renderer_->submit(texture,++receive_frame_id_);texture->Release();std::lock_guard lock(stats_mutex_);++stats_.frames_decoded;}
+    if(awaiting_keyframe_&&!frame.keyframe){
+        const auto bitstream=inspect_h264_access_unit(frame.bytes);char message[160]{};
+        std::snprintf(message,sizeof(message),"Waiting for IDR: bytes=%zu sps=%d pps=%d.",frame.bytes.size(),bitstream.has_sps?1:0,bitstream.has_pps?1:0);set_last_error(message);
+        const auto now=std::chrono::steady_clock::now();if(last_keyframe_request.time_since_epoch().count()==0||now-last_keyframe_request>=std::chrono::milliseconds(500)){transport_->request_remote_keyframe();last_keyframe_request=now;}std::lock_guard lock(stats_mutex_);++stats_.frames_dropped;continue;}ID3D11Texture2D* texture=nullptr;std::uint32_t subresource=0;int32_t result=decoder_->decode(frame,&texture,&subresource);
+    if(result==S_FALSE){const auto bitstream=inspect_h264_access_unit(frame.bytes);char message[180]{};std::snprintf(message,sizeof(message),"Decoder needs input: bytes=%zu idr=%d sps=%d pps=%d.",frame.bytes.size(),bitstream.has_idr?1:0,bitstream.has_sps?1:0,bitstream.has_pps?1:0);set_last_error(message);}
+    if(result<0){
+        char message[96]{};
+        std::snprintf(message, sizeof(message),
+                      "H.264 decoder rejected access unit (HRESULT 0x%08X).",
+                      static_cast<unsigned int>(result));
+        set_last_error(message);
+        awaiting_keyframe_=true;decoder_->reset();transport_->request_remote_keyframe();std::lock_guard lock(stats_mutex_);++stats_.frames_dropped;continue;
+    }
+    if(frame.keyframe)awaiting_keyframe_=false;if(texture){D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);cursor_->update_source_size(d.Width,d.Height);renderer_->submit(texture,subresource,++receive_frame_id_);texture->Release();std::lock_guard lock(stats_mutex_);++stats_.frames_decoded;}
 }}
 
 int32_t SnowlinkEngine::set_target_fps(int32_t target_fps) {
@@ -253,7 +266,7 @@ int32_t SnowlinkEngine::get_stats(EngineStats& out_stats) const {
         CaptureBackendStats capture_stats{};
         if (capture_manager_->get_stats(capture_stats) == 0) {
             out_stats.frames_captured = capture_stats.frames_captured;
-            out_stats.frames_dropped = capture_stats.frames_replaced;
+            out_stats.frames_dropped += capture_stats.frames_replaced;
         }
     }
     if (transport_) {
@@ -288,15 +301,28 @@ void SnowlinkEngine::transport_keyframe_request(void* context) {
 void SnowlinkEngine::stream_loop(StreamConfig config) {
     std::uint64_t last_id = 0;
     bool encoder_ready = false;
+    bool encoder_failed = false;
     const auto epoch = std::chrono::steady_clock::now();
     auto rate_mark = epoch;
     std::uint64_t rate_capture_frames = 0;
     std::uint64_t rate_encoded_frames = 0;
+    bool logged_first_access_unit = false;
     const auto frame_interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(1.0 / static_cast<double>(config.target_fps)));
     auto next_submit = epoch;
-    auto publish_frames = [this, &rate_encoded_frames](std::vector<EncodedFrame>& frames) {
+    auto publish_frames = [this, &rate_encoded_frames, &logged_first_access_unit](std::vector<EncodedFrame>& frames) {
         for (auto& frame : frames) {
+            if (!logged_first_access_unit || frame.keyframe) {
+                const auto bitstream = inspect_h264_access_unit(frame.bytes);
+                char message[180]{};
+                std::snprintf(message, sizeof(message),
+                              "Encoded AU: bytes=%zu key=%d idr=%d sps=%d pps=%d.",
+                              frame.bytes.size(), frame.keyframe ? 1 : 0,
+                              bitstream.has_idr ? 1 : 0, bitstream.has_sps ? 1 : 0,
+                              bitstream.has_pps ? 1 : 0);
+                set_last_error(message);
+                logged_first_access_unit = true;
+            }
             if (transport_->enqueue(std::move(frame)) == 0) {
                 ++rate_encoded_frames;
                 std::lock_guard lock(stats_mutex_); ++stats_.frames_encoded;
@@ -352,8 +378,24 @@ void SnowlinkEngine::stream_loop(StreamConfig config) {
         capture_texture->Release();
         ID3D11Texture2D* nv12 = nullptr;
         std::uint64_t processed_id = 0;
-        if (result == 0) result = processor_->get_latest_frame(&nv12, &processed_id);
-        if (result == 0 && !encoder_ready) {
+        if (result != 0) {
+            char message[96]{};
+            std::snprintf(message, sizeof(message),
+                          "GPU frame processing failed (HRESULT 0x%08X).",
+                          static_cast<unsigned int>(result));
+            set_last_error(message);
+        }
+        if (result == 0) {
+            result = processor_->get_latest_frame(&nv12, &processed_id);
+            if (result != 0) {
+                char message[96]{};
+                std::snprintf(message, sizeof(message),
+                              "GPU processed-frame retrieval failed (HRESULT 0x%08X).",
+                              static_cast<unsigned int>(result));
+                set_last_error(message);
+            }
+        }
+        if (result == 0 && !encoder_ready && !encoder_failed) {
             ID3D11Device* device = nullptr;
             nv12->GetDevice(&device);
             EncoderSettings settings{};
@@ -362,9 +404,36 @@ void SnowlinkEngine::stream_loop(StreamConfig config) {
             settings.fps = static_cast<std::uint32_t>(config.target_fps);
             settings.bitrate = static_cast<std::uint32_t>(config.bitrate_bps);
             settings.keyframe_interval = static_cast<std::uint32_t>(config.target_fps * 2);
+            settings.hardware_preference = HardwarePreference::AllowSoftwareFallback;
             result = encoder_->initialize(device, settings);
             device->Release();
             encoder_ready = result == 0;
+            if (encoder_ready) {
+                // The receiver deliberately ignores inter frames until it has
+                // an IDR. Some software MFTs do not make their first sample a
+                // clean point unless explicitly requested.
+                (void)encoder_->request_keyframe();
+            }
+            if (!encoder_ready) {
+                encoder_failed = true;
+                const auto& encoder_info = encoder_->info();
+                char message[192]{};
+                std::snprintf(message, sizeof(message),
+                              "H.264 encoder initialization failed at %s using %s "
+                              "(HRESULT 0x%08X).",
+                              encoder_info.failure_stage.empty() ? "unknown stage" :
+                                  encoder_info.failure_stage.c_str(),
+                              encoder_info.encoder_name.empty() ? "unknown encoder" :
+                                  encoder_info.encoder_name.c_str(),
+                              static_cast<unsigned int>(result));
+                set_last_error(message);
+            }
+        }
+        if (result == 0 && encoder_failed) {
+            // Initialization failures are deterministic for this stream
+            // configuration. Do not hammer the driver and starve the UI by
+            // retrying on every captured frame.
+            result = E_FAIL;
         }
         if (result == 0 && encoder_ready) {
             std::vector<EncodedFrame> frames;
@@ -372,6 +441,13 @@ void SnowlinkEngine::stream_loop(StreamConfig config) {
                 std::chrono::duration<std::uint64_t, std::ratio<1, 10'000'000>>>(
                     now - epoch).count();
             result = encoder_->encode(nv12, timestamp, frames);
+            if (result < 0) {
+                char message[96]{};
+                std::snprintf(message, sizeof(message),
+                              "H.264 frame submission failed (HRESULT 0x%08X).",
+                              static_cast<unsigned int>(result));
+                set_last_error(message);
+            }
             if (result == S_FALSE) {
                 std::lock_guard lock(stats_mutex_); ++stats_.frames_dropped;
                 result = 0;
@@ -400,11 +476,13 @@ EngineState SnowlinkEngine::get_state() const noexcept {
     return state_;
 }
 
-const std::string& SnowlinkEngine::last_error() const noexcept {
+std::string SnowlinkEngine::last_error() const noexcept {
+    std::lock_guard lock(error_mutex_);
     return last_error_;
 }
 
 void SnowlinkEngine::set_last_error(const char* message) noexcept {
+    std::lock_guard lock(error_mutex_);
     last_error_ = message ? message : "";
 }
 

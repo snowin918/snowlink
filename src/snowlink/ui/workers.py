@@ -245,10 +245,20 @@ def _bgr_to_qimage(bgr: Any) -> QImage | None:
         import numpy as np
     except ImportError:
         return None
-    if not isinstance(bgr, np.ndarray) or bgr.ndim != 3 or bgr.shape[2] < 3:
+    if (
+        not isinstance(bgr, np.ndarray)
+        or bgr.ndim != 3
+        or bgr.shape[2] < 3
+        or bgr.dtype != np.uint8
+    ):
         return None
     height, width = int(bgr.shape[0]), int(bgr.shape[1])
-    rgb = bgr[:, :, ::-1].copy()
-    bytes_per_line = 3 * width
+    if height <= 0 or width <= 0:
+        return None
+    # Discard alpha/extra channels before reversing BGR to RGB.  Reversing the
+    # complete last axis made BGRA rows four bytes per pixel while QImage was
+    # told they were RGB888, corrupting both channels and row boundaries.
+    rgb = np.ascontiguousarray(bgr[:, :, :3][:, :, ::-1])
+    bytes_per_line = int(rgb.strides[0])
     image = QImage(rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
     return image.copy()

@@ -30,6 +30,7 @@ struct EncoderSettings {
 struct EncoderInfo {
     std::string encoder_name;
     std::string encoder_vendor;
+    std::string failure_stage;
     bool hardware_accelerated = false;
     std::string codec = "H.264";
     std::string profile;

@@ -138,6 +138,15 @@ int32_t snowlink_engine_set_remote_sdp(void* handle, const char* sdp, const char
     return static_cast<SnowlinkEngine*>(handle)->set_transport_remote_description(sdp, type);
 }
 
+namespace { TransportConfig receive_config(const SnowlinkTransportConfig* c){TransportConfig x{};if(c->bind_address)x.bind_address=c->bind_address;x.port_min=c->port_min?c->port_min:1024;x.port_max=c->port_max?c->port_max:65535;x.mtu=c->mtu?c->mtu:1200;x.frame_queue_limit=2;x.nack_packet_limit=c->nack_packet_limit?c->nack_packet_limit:256;return x;} }
+int32_t snowlink_engine_start_receiver(void* h,uint64_t hwnd,const SnowlinkTransportConfig* c)noexcept{return h&&c?static_cast<SnowlinkEngine*>(h)->start_receiver(hwnd,receive_config(c)):-1;}
+int32_t snowlink_engine_create_receiver_answer(void* h)noexcept{return h?static_cast<SnowlinkEngine*>(h)->create_receiver_answer():-1;}
+int32_t snowlink_engine_stop_receiver(void* h)noexcept{return h?static_cast<SnowlinkEngine*>(h)->stop_receiver():-1;}
+int32_t snowlink_engine_receiver_resize(void* h)noexcept{return h?static_cast<SnowlinkEngine*>(h)->receiver_resize():-1;}
+int32_t snowlink_engine_receiver_set_visible(void* h,int32_t v)noexcept{return h?static_cast<SnowlinkEngine*>(h)->receiver_set_visible(v!=0):-1;}
+int32_t snowlink_engine_get_decoder_name(void* h,char* buffer,uint32_t size)noexcept{if(!h)return-1;std::string name;bool hw;uint32_t w,hh;double fps;auto r=static_cast<SnowlinkEngine*>(h)->get_decoder_info(name,hw,w,hh,fps);if(r)return r;uint32_t need=static_cast<uint32_t>(name.size()+1);if(!buffer||size<need)return static_cast<int32_t>(need);memcpy(buffer,name.c_str(),need);return 0;}
+int32_t snowlink_engine_get_decoder_status(void* h,int32_t* hw,uint32_t* w,uint32_t* height,double* fps)noexcept{if(!h||!hw||!w||!height||!fps)return-1;std::string name;bool hardware;auto r=static_cast<SnowlinkEngine*>(h)->get_decoder_info(name,hardware,*w,*height,*fps);*hw=hardware?1:0;return r;}
+
 int32_t snowlink_engine_set_target_fps(void* engine_handle, int32_t target_fps) noexcept {
     if (!engine_handle) {
         return -1;
@@ -206,6 +215,7 @@ int32_t snowlink_engine_get_stats(void* engine_handle, SnowlinkEngineStats* stat
     const int32_t result = engine->get_stats(internal);
     stats->capture_fps = internal.capture_fps;
     stats->encode_fps = internal.encode_fps;
+    stats->decode_fps = internal.decode_fps;
     stats->render_fps = internal.render_fps;
     stats->bitrate_bps = internal.bitrate_bps;
     stats->frames_captured = internal.frames_captured;

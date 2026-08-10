@@ -338,6 +338,81 @@ Encoder-phase validation on 2026-08-09:
 
 ## Remaining work
 
+## Native receiver, hardware decode, and D3D11 presentation
+
+The interactive View path now keeps video entirely native:
+
+```
+ICE + DTLS-SRTP WebRTC transport
+  -> RtcpReceivingSession (RR/PLI)
+  -> H.264 RTP depacketizer (complete Annex-B access units)
+  -> 2-access-unit newest-frame queue
+  -> hardware-only Media Foundation H.264 decoder MFT
+  -> DXGI-backed NV12 ID3D11Texture2D
+  -> D3D11 video-processor blit
+  -> flip-model DXGI swap chain
+  -> Qt-owned native child HWND
+```
+
+`IVideoDecoder` is the receiver-side codec contract. Its
+`H264HardwareDecoder` implementation enumerates only hardware Media Foundation
+H.264 decoder MFTs, enables low latency, binds an `IMFDXGIDeviceManager`, and
+requires DXGI-backed NV12 output. It reports the exact decoder friendly name,
+hardware status, decoded dimensions, decoded-frame count, corrupt-frame count,
+and rolling decode FPS. Output surfaces remain on the receiver's D3D11 device;
+there is no `Lock`, staging texture, NumPy array, `QImage`, or `QPixmap` in the
+active View video path.
+
+The decoder accepts Annex-B access units, including initial and changed SPS/PPS
+configuration. `MF_E_TRANSFORM_STREAM_CHANGE` selects a new NV12 output type and
+updates the published resolution. A decoder failure flushes the MFT, discards
+inter frames until an IDR arrives, and sends RTCP PLI through libdatachannel.
+libdatachannel's depacketizer does not publish incomplete FU-A frames. This keeps
+loss recovery explicit rather than continuing indefinitely with a damaged
+reference chain. Decoder/device recreation after hard device removal is still
+remaining orchestration work.
+
+`Renderer` owns the DXGI flip-discard swap chain and a native render worker. It
+uses the D3D11 video processor to convert the decoded NV12 texture directly into
+the BGRA swap-chain buffer. Source and destination rectangles preserve aspect
+ratio with black letter/pillar boxing. Client size is checked on each new frame;
+Qt resize/show/hide events also mark the swap chain for resize and suspend work
+while hidden. The same native child surface is reparented into the existing
+fullscreen window, so fullscreen does not create a Python pixel copy.
+
+Qt remains responsible for the surrounding mute/fullscreen/disconnect controls,
+status, and statistics. It creates a `WA_NativeWindow` child and passes only its
+integer HWND through ctypes. Python carries paired signaling SDP and polls state
+and decoder statistics; it receives no access units or video pixels. Network
+callbacks only replace entries in a two-frame native queue. Decode and render
+run on separate native workers, and presentation is latest-only: queued old
+access units and an unpresented old texture are replaced. The renderer wakes for
+a changed frame or a surface-state change and does not continuously repaint an
+unchanged desktop frame.
+
+Build validation on 2026-08-10:
+
+- Release `snowlink_engine.dll` builds with VS 2022 and Windows SDK 10.0.26100.
+- Native lifecycle/backend tests pass 7/7, and the Python package compile check
+  passes.
+- Live loopback and two-machine validation cannot run in the non-interactive
+  automation desktop. On two interactive Windows machines, still verify first
+  SPS/PPS/IDR startup, resize, fullscreen, DPI/monitor transitions, minimize and
+  restore, reconnect, sender resolution change, induced RTP loss/PLI recovery,
+  and the reported hardware decoder name/status.
+
+### Receiver remaining work
+
+- Add an automated encoded H.264 fixture/loopback receiver executable with
+  deterministic packet removal, SPS/PPS changes, and PLI assertions.
+- Recreate decoder, swap chain, and D3D11 device after hard device removal and
+  adapter migration; current resize/minimize/monitor handling assumes the device
+  remains valid.
+- Integrate native audio receive or explicitly coordinate a separate audio-only
+  peer; the new native View negotiation currently implements video only.
+- Surface connection/error/statistics changes as a native event queue instead of
+  polling them at control-plane cadence.
+
 - Run and record WGC and DXGI benchmarks on an interactive physical/VM desktop,
   including display-mode change and monitor disconnect/reconnect.
 - Complete production MSIX identity/signing/assets for optional WGC borderless
@@ -348,4 +423,4 @@ Encoder-phase validation on 2026-08-09:
 
 ## Next phase
 
-Next phase: implement native receive, hardware decode, and D3D11 rendering.
+Next phase: implement native cursor and remote-input path.

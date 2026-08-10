@@ -40,10 +40,13 @@ class ViewPage(QWidget):
     frame_ready = Signal(object)  # QImage
     session_finished = Signal()
     session_failed = Signal(str)
+    native_surface_requested = Signal()
 
     def __init__(self, preferences: Any | None = None) -> None:
         super().__init__()
         self._preferences = preferences
+        self._native_surface_handle = 0
+        self._native_engine: Any | None = None
         self._audio_controls = AudioPlaybackControls(muted=False, gain=1.0)
         self._session = AsyncioSessionWorker(self)
         self._session.state_changed.connect(self._on_session_state)
@@ -126,10 +129,25 @@ class ViewPage(QWidget):
     def mark_frame_consumed(self) -> None:
         self._session.mark_frame_consumed()
 
+    def set_native_surface_handle(self, hwnd: int) -> None:
+        self._native_surface_handle = int(hwnd)
+
+    def native_surface_changed(self, visible: bool) -> None:
+        engine = self._native_engine
+        if engine is None:
+            return
+        try:
+            engine.receiver_set_visible(visible)
+            if visible:
+                engine.receiver_resize()
+        except Exception:
+            pass
+
     def _connect(self) -> None:
         if self._session.is_running:
             QMessageBox.warning(self, "Busy", "Already connected or connecting.")
             return
+        self.native_surface_requested.emit()
         remote_ip = self._ip.text().strip()
         if not remote_ip:
             QMessageBox.warning(
@@ -153,7 +171,7 @@ class ViewPage(QWidget):
         def factory(stop_event: Any, on_state: Any, on_frame: Any) -> Any:
             from snowlink.rtc.screen_session import (
                 ScreenViewConfiguration,
-                run_screen_view,
+                run_native_screen_view,
             )
 
             config = ScreenViewConfiguration(
@@ -169,12 +187,11 @@ class ViewPage(QWidget):
                 gain=controls.gain,
                 playback_controls=controls,
             )
-            return run_screen_view(
-                config,
-                stop_event=stop_event,
-                on_state=on_state,
-                on_frame=on_frame,
-            )
+            if not self._native_surface_handle:
+                raise RuntimeError("Native video surface is unavailable")
+            return run_native_screen_view(config, hwnd=self._native_surface_handle,
+                stop_event=stop_event, on_state=on_state,
+                on_engine=lambda engine: setattr(self, "_native_engine", engine))
 
         try:
             self._session.start(factory)
@@ -205,6 +222,7 @@ class ViewPage(QWidget):
         self.frame_ready.emit(image)
 
     def _on_session_finished(self, _state: Any) -> None:
+        self._native_engine = None
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
         self._stats.clear()
@@ -212,6 +230,7 @@ class ViewPage(QWidget):
         self.session_finished.emit()
 
     def _on_session_failed(self, message: str) -> None:
+        self._native_engine = None
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
         self._stats.clear()

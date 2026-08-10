@@ -36,6 +36,8 @@ struct TransportStats {
 class Transport {
 public:
     using KeyframeRequest = void (*)(void* context);
+    using AccessUnitCallback = void (*)(void* context, const std::uint8_t* data,
+                                        std::size_t size, std::uint64_t timestamp);
 
     Transport();
     ~Transport();
@@ -44,10 +46,14 @@ public:
 
     int32_t initialize(const TransportConfig& config, KeyframeRequest on_keyframe,
                        void* keyframe_context);
+    int32_t initialize_receiver(const TransportConfig& config, AccessUnitCallback callback,
+                                void* callback_context);
     int32_t create_offer();
+    int32_t create_answer();
     int32_t get_local_description(std::string& sdp, std::string& type) const;
     int32_t set_remote_description(const std::string& sdp, const std::string& type);
     int32_t enqueue(EncodedFrame frame);
+    int32_t request_remote_keyframe();
     int32_t get_stats(TransportStats& stats) const;
     int32_t shutdown();
 

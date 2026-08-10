@@ -38,6 +38,8 @@ public:
     std::chrono::steady_clock::time_point bitrate_mark{};
     KeyframeRequest keyframe_callback = nullptr;
     void* keyframe_context = nullptr;
+    AccessUnitCallback access_unit_callback = nullptr;
+    void* access_unit_context = nullptr;
 
     void run() {
         for (;;) {
@@ -86,6 +88,41 @@ public:
 
 Transport::Transport() : state_(std::make_unique<State>()) {}
 Transport::~Transport() { shutdown(); }
+
+namespace {
+rtc::Configuration receiver_configuration(const TransportConfig& config) {
+    rtc::Configuration c;
+    if (!config.bind_address.empty()) c.bindAddress = config.bind_address;
+    c.portRangeBegin=config.port_min; c.portRangeEnd=config.port_max; c.mtu=config.mtu;
+    c.forceMediaTransport=true; c.disableAutoNegotiation=true; return c;
+}
+}
+
+int32_t Transport::initialize_receiver(const TransportConfig& config, AccessUnitCallback callback,
+                                       void* context) {
+    shutdown();
+    if (!callback || config.port_min > config.port_max) return -1;
+    try {
+        auto peer=std::make_shared<rtc::PeerConnection>(receiver_configuration(config));
+        auto video=rtc::Description::Video("video",rtc::Description::Direction::RecvOnly);
+        video.addH264Codec(kH264PayloadType,"profile-level-id=4d001f;packetization-mode=1;level-asymmetry-allowed=1");
+        auto track=peer->addTrack(video);
+        auto receiving=std::make_shared<rtc::RtcpReceivingSession>();
+        receiving->addToChain(std::make_shared<rtc::H264RtpDepacketizer>(rtc::NalUnit::Separator::StartSequence));
+        track->setMediaHandler(receiving);
+        track->onMessage([this](rtc::binary data) {
+            AccessUnitCallback cb=nullptr; void* ctx=nullptr;
+            { std::lock_guard lock(state_->mutex); cb=state_->access_unit_callback; ctx=state_->access_unit_context; }
+            if (cb && !data.empty()) cb(ctx,reinterpret_cast<const std::uint8_t*>(data.data()),data.size(),
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count()/100));
+        }, nullptr);
+        peer->onLocalDescription([this](rtc::Description d){std::lock_guard lock(state_->mutex);state_->local_sdp=static_cast<std::string>(d);state_->local_type=d.typeString();state_->local_ready=true;});
+        peer->onStateChange([this](rtc::PeerConnection::State s){std::lock_guard lock(state_->mutex);state_->stats.connected=s==rtc::PeerConnection::State::Connected;if(s==rtc::PeerConnection::State::Failed)++state_->stats.transport_errors;});
+        std::lock_guard lock(state_->mutex); state_->config=config;state_->peer=std::move(peer);state_->track=std::move(track);
+        state_->access_unit_callback=callback;state_->access_unit_context=context;state_->stopping=false; return 0;
+    } catch (...) { shutdown(); return -2; }
+}
 
 int32_t Transport::initialize(const TransportConfig& config, KeyframeRequest callback,
                               void* context) {
@@ -164,6 +201,17 @@ int32_t Transport::create_offer() {
     catch (...) { return -2; }
 }
 
+int32_t Transport::create_answer() {
+    std::shared_ptr<rtc::PeerConnection> peer;
+    { std::lock_guard lock(state_->mutex); peer=state_->peer; state_->local_ready=false; }
+    if(!peer)return -1; try{peer->setLocalDescription(rtc::Description::Type::Answer);return 0;}catch(...){return -2;}
+}
+
+int32_t Transport::request_remote_keyframe() {
+    std::shared_ptr<rtc::Track> track; {std::lock_guard lock(state_->mutex);track=state_->track;}
+    return track && track->requestKeyframe() ? 0 : -1;
+}
+
 int32_t Transport::get_local_description(std::string& sdp, std::string& type) const {
     std::lock_guard lock(state_->mutex);
     if (!state_->local_ready) return 1;
@@ -215,6 +263,7 @@ int32_t Transport::shutdown() {
     if (peer) peer->close();
     std::lock_guard lock(state_->mutex);
     state_->track.reset(); state_->rtp.reset(); state_->peer.reset();
+    state_->access_unit_callback=nullptr; state_->access_unit_context=nullptr;
     state_->local_ready = false; state_->stats.connected = false;
     return 0;
 }

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCloseEvent, QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -16,6 +16,24 @@ from PySide6.QtWidgets import (
 )
 
 from snowlink.ui.widgets.stats_panel import StatsPanel
+
+
+class NativeVideoSurface(QWidget):
+    """Qt layout participant backed by a stable child HWND."""
+
+    surface_changed = Signal(bool)
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.surface_changed.emit(self.isVisible())
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.surface_changed.emit(True)
+
+    def hideEvent(self, event: Any) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self.surface_changed.emit(False)
 
 
 class ShareSessionWindow(QWidget):
@@ -117,6 +135,13 @@ class ViewSessionWindow(QWidget):
             "background:#ECEFF1; color:#546E7A; border-radius:12px; border:1px solid #BBDEFB;"
         )
         layout.addWidget(self._video, stretch=1)
+        placeholder = self._video
+        self._video = NativeVideoSurface()
+        self._video.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self._video.setMinimumHeight(240)
+        self._video.setStyleSheet("background:#000;")
+        layout.replaceWidget(placeholder, self._video)
+        placeholder.deleteLater()
 
         self._status = QLabel("Connecting…")
         self._status.setObjectName("hint")
@@ -133,6 +158,14 @@ class ViewSessionWindow(QWidget):
         self._mute.blockSignals(True)
         self._mute.setChecked(bool(muted))
         self._mute.blockSignals(False)
+
+    @property
+    def native_video_handle(self) -> int:
+        return int(self._video.winId())
+
+    @property
+    def native_video_surface(self) -> NativeVideoSurface:
+        return self._video
 
     def update_state(self, state: Any) -> None:
         detail = str(getattr(state, "detail", "") or "").strip()
@@ -170,6 +203,7 @@ class ViewSessionWindow(QWidget):
 
     def _toggle_fullscreen(self) -> None:
         if self._fullscreen_window is not None and self._fullscreen_window.isVisible():
+            self.layout().insertWidget(1, self._video, 1)
             self._fullscreen_window.close()
             self._fullscreen_window = None
             self._fullscreen_label = None
@@ -180,9 +214,9 @@ class ViewSessionWindow(QWidget):
         win.setStyleSheet("background:#000;")
         lay = QVBoxLayout(win)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self._video)
         label = QLabel()
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(label)
         if self._last_pixmap is not None:
             screen = win.screen()
             size = (
@@ -204,6 +238,7 @@ class ViewSessionWindow(QWidget):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._fullscreen_window is not None:
+            self.layout().insertWidget(1, self._video, 1)
             self._fullscreen_window.close()
             self._fullscreen_window = None
             self._fullscreen_label = None

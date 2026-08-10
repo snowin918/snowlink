@@ -12,6 +12,9 @@
 #include <chrono>
 #include <vector>
 #include <utility>
+#include <d3d11.h>
+#include <algorithm>
+#include <wrl/client.h>
 
 namespace snowlink {
 
@@ -31,7 +34,7 @@ int32_t SnowlinkEngine::initialize() {
     capture_manager_ = std::make_unique<CaptureManager>();
     encoder_ = std::make_unique<H264HardwareEncoder>();
     processor_ = std::make_unique<GpuFrameProcessor>();
-    decoder_ = std::make_unique<Decoder>();
+    decoder_ = std::make_unique<H264HardwareDecoder>();
     renderer_ = std::make_unique<Renderer>();
     transport_ = std::make_unique<Transport>();
     cursor_ = std::make_unique<CursorSubsystem>();
@@ -46,6 +49,7 @@ int32_t SnowlinkEngine::shutdown() {
         return 0;
     }
 
+    stop_receiver();
     stop_stream();
     if (input_) {
         input_->shutdown();
@@ -156,6 +160,37 @@ int32_t SnowlinkEngine::set_transport_remote_description(const std::string& sdp,
     return transport_ ? transport_->set_remote_description(sdp, type) : -1;
 }
 
+int32_t SnowlinkEngine::start_receiver(std::uint64_t hwnd_value, const TransportConfig& config) {
+    if (state_ != EngineState::Initialized || !decoder_ || !renderer_ || !transport_) return -1;
+    HWND hwnd=reinterpret_cast<HWND>(static_cast<std::uintptr_t>(hwnd_value)); if(!IsWindow(hwnd))return -2;
+    UINT flags=D3D11_CREATE_DEVICE_BGRA_SUPPORT|D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+    D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0}; D3D_FEATURE_LEVEL level{};
+    Microsoft::WRL::ComPtr<ID3D11Device> device; Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+    HRESULT hr=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,flags,levels,ARRAYSIZE(levels),D3D11_SDK_VERSION,&device,&level,&context);
+    if(FAILED(hr))return hr;
+    int32_t result=decoder_->initialize(device.Get()); if(result!=0)return result;
+    result=renderer_->initialize(hwnd,device.Get()); if(result!=0){decoder_->shutdown();return result;}
+    result=transport_->initialize_receiver(config,&SnowlinkEngine::transport_access_unit,this);
+    if(result!=0){renderer_->shutdown();decoder_->shutdown();return result;}
+    stop_receive_requested_=false;awaiting_keyframe_=true;receive_thread_=std::thread([this]{receive_loop();});return 0;
+}
+int32_t SnowlinkEngine::create_receiver_answer(){return transport_?transport_->create_answer():-1;}
+int32_t SnowlinkEngine::stop_receiver(){stop_receive_requested_=true;receive_wake_.notify_all();if(receive_thread_.joinable())receive_thread_.join();{std::lock_guard lock(receive_mutex_);receive_queue_.clear();}if(transport_)transport_->shutdown();if(renderer_)renderer_->shutdown();if(decoder_)decoder_->shutdown();return 0;}
+int32_t SnowlinkEngine::receiver_resize(){return renderer_?renderer_->resize():-1;}
+int32_t SnowlinkEngine::receiver_set_visible(bool v){return renderer_?renderer_->set_visible(v):-1;}
+int32_t SnowlinkEngine::get_decoder_info(std::string& name,bool& hw,std::uint32_t& w,std::uint32_t& h,double& fps)const{if(!decoder_)return -1;const auto&i=decoder_->info();name=i.decoder_name;hw=i.hardware_accelerated;w=i.decoded_width;h=i.decoded_height;fps=i.decode_fps;return 0;}
+
+void SnowlinkEngine::transport_access_unit(void* context,const std::uint8_t* data,std::size_t size,std::uint64_t timestamp){
+    if(!context||!data||!size)return;auto*self=static_cast<SnowlinkEngine*>(context);EncodedFrame frame;frame.timestamp=timestamp;frame.bytes.assign(data,data+size);
+    for(size_t i=0;i+4<size;++i)if(data[i]==0&&data[i+1]==0&&((data[i+2]==1&&((data[i+3]&31)==5))||(data[i+2]==0&&data[i+3]==1&&((data[i+4]&31)==5)))){frame.keyframe=true;break;}
+    std::lock_guard lock(self->receive_mutex_);if(self->receive_queue_.size()>=2){self->receive_queue_.pop_front();++self->stats_.frames_dropped;}self->receive_queue_.push_back(std::move(frame));self->receive_wake_.notify_one();
+}
+void SnowlinkEngine::receive_loop(){while(!stop_receive_requested_){EncodedFrame frame;{std::unique_lock lock(receive_mutex_);receive_wake_.wait(lock,[&]{return stop_receive_requested_||!receive_queue_.empty();});if(stop_receive_requested_)break;frame=std::move(receive_queue_.back());receive_queue_.clear();}
+    if(awaiting_keyframe_&&!frame.keyframe)continue;ID3D11Texture2D* texture=nullptr;int32_t result=decoder_->decode(frame,&texture);
+    if(result<0){awaiting_keyframe_=true;decoder_->reset();transport_->request_remote_keyframe();std::lock_guard lock(stats_mutex_);++stats_.frames_dropped;continue;}
+    if(frame.keyframe)awaiting_keyframe_=false;if(texture){renderer_->submit(texture,++receive_frame_id_);texture->Release();std::lock_guard lock(stats_mutex_);++stats_.frames_decoded;}
+}}
+
 int32_t SnowlinkEngine::set_target_fps(int32_t target_fps) {
     stats_.capture_fps = static_cast<double>(target_fps);
     return 0;
@@ -209,6 +244,16 @@ int32_t SnowlinkEngine::get_stats(EngineStats& out_stats) const {
         out_stats.network_rtt_ms = transport_stats.rtt;
         out_stats.estimated_loss = transport_stats.estimated_loss;
         out_stats.transport_errors = transport_stats.transport_errors;
+    }
+    if (decoder_) {
+        const auto& decoder_info = decoder_->info();
+        out_stats.decode_fps = decoder_info.decode_fps;
+        out_stats.frames_decoded = decoder_info.frames_decoded;
+    }
+    if (renderer_) {
+        RendererStats renderer_stats{};
+        renderer_->get_stats(renderer_stats);
+        out_stats.render_fps = renderer_stats.render_fps;
     }
     return 0;
 }

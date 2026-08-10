@@ -63,6 +63,7 @@ class _EngineStats(ctypes.Structure):
     _fields_ = [
         ("capture_fps", ctypes.c_double),
         ("encode_fps", ctypes.c_double),
+        ("decode_fps", ctypes.c_double),
         ("render_fps", ctypes.c_double),
         ("bitrate_bps", ctypes.c_int64),
         ("frames_captured", ctypes.c_uint64),
@@ -88,6 +89,7 @@ class _EngineStats(ctypes.Structure):
 class NativeEngineStats:
     capture_fps: float
     encode_fps: float
+    decode_fps: float
     render_fps: float
     bitrate_bps: int
     frames_captured: int
@@ -156,6 +158,18 @@ def _bind(dll: ctypes.CDLL) -> None:
     dll.snowlink_engine_set_remote_sdp.argtypes = [
         ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p
     ]
+    dll.snowlink_engine_start_receiver.restype = ctypes.c_int32
+    dll.snowlink_engine_start_receiver.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.POINTER(_TransportConfig)]
+    for name in ("snowlink_engine_create_receiver_answer", "snowlink_engine_stop_receiver", "snowlink_engine_receiver_resize"):
+        fn = getattr(dll, name)
+        fn.restype = ctypes.c_int32
+        fn.argtypes = [ctypes.c_void_p]
+    dll.snowlink_engine_receiver_set_visible.restype = ctypes.c_int32
+    dll.snowlink_engine_receiver_set_visible.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    dll.snowlink_engine_get_decoder_name.restype = ctypes.c_int32
+    dll.snowlink_engine_get_decoder_name.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+    dll.snowlink_engine_get_decoder_status.restype = ctypes.c_int32
+    dll.snowlink_engine_get_decoder_status.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_double)]
 
     dll.snowlink_engine_set_target_fps.restype = ctypes.c_int32
     dll.snowlink_engine_set_target_fps.argtypes = [ctypes.c_void_p, ctypes.c_int32]
@@ -376,6 +390,32 @@ class NativeEngine:
             self._handle, sdp.encode("utf-8"), sdp_type.encode("ascii")
         )))
 
+    def start_receiver(self, *, hwnd: int, bind_address: str = "") -> None:
+        self._ensure_alive()
+        cfg = _TransportConfig(bind_address.encode(), 1024, 65535, 1200, 2, 256)
+        self._check(int(self._dll.snowlink_engine_start_receiver(self._handle, int(hwnd), ctypes.byref(cfg))))
+
+    def create_receiver_answer(self) -> None:
+        self._check(int(self._dll.snowlink_engine_create_receiver_answer(self._handle)))
+
+    def stop_receiver(self) -> None:
+        self._check(int(self._dll.snowlink_engine_stop_receiver(self._handle)))
+
+    def receiver_resize(self) -> None:
+        self._check(int(self._dll.snowlink_engine_receiver_resize(self._handle)))
+
+    def receiver_set_visible(self, visible: bool) -> None:
+        self._check(int(self._dll.snowlink_engine_receiver_set_visible(self._handle, int(visible))))
+
+    def decoder_status(self) -> dict[str, Any]:
+        required = int(self._dll.snowlink_engine_get_decoder_name(self._handle, None, 0))
+        name = ctypes.create_string_buffer(max(required, 1))
+        if required > 0:
+            self._check(int(self._dll.snowlink_engine_get_decoder_name(self._handle, name, required)))
+        hardware = ctypes.c_int32(); width = ctypes.c_uint32(); height = ctypes.c_uint32(); fps = ctypes.c_double()
+        self._check(int(self._dll.snowlink_engine_get_decoder_status(self._handle, ctypes.byref(hardware), ctypes.byref(width), ctypes.byref(height), ctypes.byref(fps))))
+        return {"decoder_name": name.value.decode(errors="replace"), "hardware_accelerated": bool(hardware.value), "decoded_width": width.value, "decoded_height": height.value, "decode_fps": fps.value}
+
     def stop_stream(self) -> None:
         self._ensure_alive()
         self._check(int(self._dll.snowlink_engine_stop_stream(self._handle)))
@@ -442,6 +482,7 @@ class NativeEngine:
         return NativeEngineStats(
             capture_fps=float(raw.capture_fps),
             encode_fps=float(raw.encode_fps),
+            decode_fps=float(raw.decode_fps),
             render_fps=float(raw.render_fps),
             bitrate_bps=int(raw.bitrate_bps),
             frames_captured=int(raw.frames_captured),

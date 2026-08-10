@@ -80,6 +80,7 @@ struct StreamConfig {
 struct EngineStats {
     double capture_fps = 0.0;
     double encode_fps = 0.0;
+    double decode_fps = 0.0;
     double render_fps = 0.0;
     std::int64_t bitrate_bps = 0;
     std::uint64_t frames_captured = 0;

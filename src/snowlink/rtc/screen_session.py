@@ -179,6 +179,69 @@ class ScreenSessionState:
 StateCallback = Callable[[ScreenSessionState], None]
 
 
+async def run_native_screen_view(
+    config: ScreenViewConfiguration, *, hwnd: int,
+    stop_event: asyncio.Event | None = None,
+    on_state: StateCallback | None = None,
+    on_engine: Callable[[Any], None] | None = None,
+) -> ScreenSessionState:
+    """Native H.264 receive/decode/render; Python carries signaling and state only."""
+    from snowlink.native_engine import NativeEngine
+
+    stop = stop_event or asyncio.Event()
+    state = ScreenSessionState(role="view", phase="connecting", remote_ip=config.remote_ip,
+                               port=config.signaling_port, pairing_code=config.pairing_code)
+    _notify(on_state, state)
+    client: WsSignalingClient | None = None
+    engine = NativeEngine.create()
+    if on_engine is not None:
+        on_engine(engine)
+    try:
+        engine.initialize()
+        engine.start_receiver(hwnd=hwnd, bind_address=config.requested_source_ip or "")
+        client = WsSignalingClient(remote_ip=config.remote_ip, port=config.signaling_port,
+            pairing_code=config.pairing_code, source_ip=config.requested_source_ip,
+            connect_timeout_s=config.timeouts.signaling_connect_s)
+        state.phase = "pairing"; state.detail = "Connecting and pairing"
+        _notify(on_state, state)
+        await client.connect_and_pair_with_retry(max_attempts=5, stop_event=stop)
+        state.phase = "negotiating"; state.detail = "Paired; negotiating native H.264 receiver"
+        _notify(on_state, state)
+        offer = await asyncio.wait_for(client.wait_offer(), timeout=config.timeouts.offer_answer_s)
+        engine.set_remote_description(sdp=offer["sdp"], sdp_type=offer["type"])
+        engine.create_receiver_answer()
+        deadline = time.perf_counter() + config.timeouts.ice_gathering_s
+        answer = None
+        while answer is None and time.perf_counter() < deadline:
+            answer = engine.local_description()
+            if answer is None: await asyncio.sleep(0.02)
+        if answer is None: raise TimeoutError("native ICE gathering timed out")
+        await client.send_answer(sdp=answer["sdp"], sdp_type=answer["type"])
+        state.phase = "viewing"; state.detail = "Receiving remote screen (native GPU video)"
+        _notify(on_state, state)
+        last_size = (0, 0)
+        while not stop.is_set():
+            decoder = engine.decoder_status()
+            size = (int(decoder["decoded_width"]), int(decoder["decoded_height"]))
+            if size != last_size and all(size):
+                last_size = size
+                state.detail = f"Native {decoder['decoder_name']} — {size[0]}×{size[1]} @ {decoder['decode_fps']:.1f} fps"
+                state.frames = engine.get_stats().frames_decoded
+                _notify(on_state, state)
+            try: await asyncio.wait_for(stop.wait(), timeout=0.5)
+            except TimeoutError: pass
+        state.phase = "stopped"; state.detail = "View stopped"
+    except Exception as exc:
+        state.phase = "failed"; state.error = str(exc); state.detail = str(exc)
+        _notify(on_state, state)
+    finally:
+        if client is not None: await client.close()
+        try: engine.stop_receiver()
+        except Exception: pass
+        engine.shutdown(); engine.destroy()
+    return state
+
+
 async def _wait_ice_recovery(
     pc: Any,
     *,

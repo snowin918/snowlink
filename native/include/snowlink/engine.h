@@ -8,13 +8,16 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <condition_variable>
+#include <deque>
+#include "encoder.h"
 
 namespace snowlink {
 
 class CaptureManager;
 class IVideoEncoder;
 class GpuFrameProcessor;
-class Decoder;
+class IVideoDecoder;
 class Renderer;
 class Transport;
 struct TransportConfig;
@@ -39,6 +42,13 @@ public:
     int32_t create_transport_offer();
     int32_t get_transport_local_description(std::string& sdp, std::string& type) const;
     int32_t set_transport_remote_description(const std::string& sdp, const std::string& type);
+    int32_t start_receiver(std::uint64_t hwnd, const TransportConfig& config);
+    int32_t create_receiver_answer();
+    int32_t stop_receiver();
+    int32_t receiver_resize();
+    int32_t receiver_set_visible(bool visible);
+    int32_t get_decoder_info(std::string& name, bool& hardware, std::uint32_t& width,
+                             std::uint32_t& height, double& fps) const;
 
     int32_t set_target_fps(int32_t target_fps);
     int32_t set_bitrate(int32_t bitrate_bps);
@@ -54,7 +64,9 @@ public:
 
 private:
     static void transport_keyframe_request(void* context);
+    static void transport_access_unit(void* context, const std::uint8_t* data, std::size_t size, std::uint64_t timestamp);
     void stream_loop(StreamConfig config);
+    void receive_loop();
     void set_last_error(const char* message) noexcept;
 
     EngineState state_;
@@ -64,7 +76,7 @@ private:
     std::unique_ptr<CaptureManager> capture_manager_;
     std::unique_ptr<IVideoEncoder> encoder_;
     std::unique_ptr<GpuFrameProcessor> processor_;
-    std::unique_ptr<Decoder> decoder_;
+    std::unique_ptr<IVideoDecoder> decoder_;
     std::unique_ptr<Renderer> renderer_;
     std::unique_ptr<Transport> transport_;
     std::unique_ptr<CursorSubsystem> cursor_;
@@ -72,6 +84,13 @@ private:
     mutable std::mutex stats_mutex_;
     std::thread stream_thread_;
     std::atomic<bool> stop_stream_requested_{false};
+    std::thread receive_thread_;
+    std::atomic<bool> stop_receive_requested_{false};
+    mutable std::mutex receive_mutex_;
+    std::condition_variable receive_wake_;
+    std::deque<EncodedFrame> receive_queue_;
+    std::uint64_t receive_frame_id_ = 0;
+    bool awaiting_keyframe_ = true;
 };
 
 } // namespace snowlink

@@ -155,6 +155,7 @@ class MainWindow(QMainWindow):
         self._view.frame_ready.connect(self._on_view_frame)
         self._view.session_finished.connect(self._on_view_finished)
         self._view.session_failed.connect(self._on_view_failed)
+        self._view.native_surface_requested.connect(self._prepare_native_view_surface)
 
         register_app_shutdown("persist-preferences", self._persist_preferences)
         register_app_shutdown("share-session-stop", self._share.stop_sharing)
@@ -232,8 +233,14 @@ class MainWindow(QMainWindow):
                 parent=self,
             )
             win.setWindowIcon(self.windowIcon())
+            win.native_video_surface.surface_changed.connect(self._view.native_surface_changed)
             self._view_session_window = win
         return self._view_session_window
+
+    def _prepare_native_view_surface(self) -> None:
+        win = self._ensure_view_session_window()
+        win.show()
+        self._view.set_native_surface_handle(win.native_video_handle)
 
     def _close_view_session_window(self, *, invoke_disconnect: bool = False) -> None:
         win = self._view_session_window

@@ -9,7 +9,7 @@
 namespace snowlink {
 
 class CaptureManager;
-class Encoder;
+class IVideoEncoder;
 class Decoder;
 class Renderer;
 class Transport;
@@ -50,7 +50,7 @@ private:
     std::string last_error_;
 
     std::unique_ptr<CaptureManager> capture_manager_;
-    std::unique_ptr<Encoder> encoder_;
+    std::unique_ptr<IVideoEncoder> encoder_;
     std::unique_ptr<Decoder> decoder_;
     std::unique_ptr<Renderer> renderer_;
     std::unique_ptr<Transport> transport_;

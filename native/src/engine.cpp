@@ -26,7 +26,7 @@ int32_t SnowlinkEngine::initialize() {
     }
 
     capture_manager_ = std::make_unique<CaptureManager>();
-    encoder_ = std::make_unique<Encoder>();
+    encoder_ = std::make_unique<H264HardwareEncoder>();
     decoder_ = std::make_unique<Decoder>();
     renderer_ = std::make_unique<Renderer>();
     transport_ = std::make_unique<Transport>();

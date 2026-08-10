@@ -13,7 +13,8 @@ CaptureManager (auto | wgc | dxgi)
   -> GPU CopyResource into a 2-slot Snowlink-owned latest-frame pool
   -> GpuFrameProcessor (D3D11 video processor: crop/rotate/scale/convert)
   -> pooled NV12 ID3D11Texture2D
-  -> future native hardware encoder
+  -> Media Foundation H.264 encoder MFT (D3D11 device manager)
+  -> native EncodedFrame access units
 ```
 
 There is no staging texture, `Map`, CPU readback, Python bytes, NumPy, OpenCV,
@@ -108,10 +109,42 @@ intentionally omitted because collecting exact completion time would add waits.
 
 Known limitations: format conversion, scaling quality, and maximum dimensions are
 driver-dependent; rotation needs `ID3D11VideoContext1`; color-space/range controls
-currently use the driver's SDR defaults; and cross-device encoder handoff is not
-implemented. The two-slot pool assumes the encoder submits reads in the same D3D11
-command ordering before a slot cycles back. These constraints should be resolved
-or validated as part of encoder integration.
+currently use the driver's SDR defaults. Media Foundation samples retain
+submitted textures, and the MFT is bound to the same D3D11 device. Cross-device
+encoder input remains unsupported and is rejected explicitly.
+
+## Native H.264 encoding
+
+`IVideoEncoder` is the native contract. `H264HardwareEncoder` implements it with
+Media Foundation encoder MFTs and supports width, height, FPS, bitrate, keyframe
+interval, low-latency mode, CBR/VBR, and hardware policy. It exposes
+`initialize`, `encode`, `request_keyframe`, `set_bitrate`, `set_fps`, and
+`shutdown`.
+
+Initialization uses `MFTEnumEx` to request a hardware H.264 encoder. The selected
+activation's friendly name is reported with inferred vendor, codec, Main profile,
+resolution, FPS, bitrate, and a hardware boolean. That boolean is true only for a
+transform returned by hardware-only enumeration; codec availability is not
+mistaken for hardware acceleration.
+
+`RequireHardware` is the default and fails explicitly when no hardware MFT can
+be activated. `PreferHardware` likewise does not silently change the performance
+model. Software is tried only for explicit `AllowSoftwareFallback`, and is
+reported as `hardware_accelerated=false`. There is no x264 path.
+
+An `IMFDXGIDeviceManager` binds the hardware MFT to the processor's D3D11 device.
+`MFCreateDXGISurfaceBuffer` wraps each NV12 `ID3D11Texture2D` directly. There is
+no staging texture, `Map`, raw CPU copy, or Python object in the normal path;
+only compressed H.264 output is copied into native `EncodedFrame` storage.
+
+Low-latency codec attributes request one reference frame, short GOPs, and no
+unnecessary reordering. Asynchronous hardware MFT events are pumped without
+blocking; when the encoder cannot accept input, the latest frame is dropped
+instead of queued without bound. `request_keyframe` uses `ICodecAPI`.
+`set_bitrate` changes `CODECAPI_AVEncCommonMeanBitRate` dynamically and returns a
+driver error if unsupported. `set_fps` changes timestamp cadence without an
+application teardown; mid-stream media-type renegotiation is avoided because it
+is driver-dependent.
 
 ## Dirty/move metadata and cursor
 
@@ -135,6 +168,7 @@ native\build\bin\Release\snowlink_capture_test.exe --backend dxgi --monitor 0 --
 native\build\bin\Release\snowlink_capture_test.exe --backend auto --monitor 1 --seconds 30
 native\build\bin\Release\snowlink_capture_test.exe --backend auto --monitor 0 --seconds 30 --preprocess
 native\build\bin\Release\snowlink_capture_test.exe --backend dxgi --monitor 0 --seconds 30 --target 1920 1080
+native\build\bin\Release\snowlink_encoder_benchmark.exe --backend auto --monitor 0 --seconds 30 --target 1920 1080 --fps 60 --bitrate 8000000
 ```
 
 The test selects auto/WGC/DXGI, acquires only GPU textures, and prints periodic
@@ -157,6 +191,24 @@ the GPU processor, obtains the latest NV12 GPU texture, and discards it without
 encoding. `--target W H` additionally tests scaling. This path never maps a
 texture or reads screen pixels back to the CPU.
 
+The encoder benchmark runs capture -> GPU process -> H.264 encode and discards
+native compressed frames. It reports capture FPS, encode FPS, encoded Mbps,
+keyframes, drops, exact encoder name, hardware true/false, and process CPU once
+per second. Hardware is required by default. `--allow-software` is an explicit
+diagnostic fallback and visibly reports `hardware=false` when used.
+
+Encoder-phase validation on 2026-08-09:
+
+- The Release DLL, capture test, and encoder benchmark compile with VS 2022 and
+  Windows SDK 10.0.26100.
+- This automated execution desktop cannot enter the live pipeline: WGC is
+  unavailable and DXGI returns `0x80070005` (`E_ACCESSDENIED`). The benchmark
+  exits with `capture start failed: -2147024891`, so no encoder identity or live
+  throughput is claimed here.
+- Run the benchmark on an interactive Windows desktop to record live hardware
+  selection and throughput. A successful run prints the exact MFT name and
+  `hardware=true` before periodic statistics.
+
 ## Remaining work
 
 - Run and record WGC and DXGI benchmarks on an interactive physical/VM desktop,
@@ -164,8 +216,9 @@ texture or reads screen pixels back to the CPU.
 - Complete production MSIX identity/signing/assets for optional WGC borderless
   capture.
 - Add production runtime failover/backoff above `CaptureManager`.
-- Connect the pooled NV12 output to the native hardware encoder.
+- Run and record encoder benchmarks on representative Intel, NVIDIA, and AMD
+  systems where available.
 
 ## Next phase
 
-Next phase: implement native hardware H.264 encoder.
+Next phase: build native low-latency media transport.

@@ -48,6 +48,17 @@ class _StreamConfig(ctypes.Structure):
     ]
 
 
+class _TransportConfig(ctypes.Structure):
+    _fields_ = [
+        ("bind_address", ctypes.c_char_p),
+        ("port_min", ctypes.c_uint16),
+        ("port_max", ctypes.c_uint16),
+        ("mtu", ctypes.c_uint32),
+        ("frame_queue_limit", ctypes.c_uint32),
+        ("nack_packet_limit", ctypes.c_uint32),
+    ]
+
+
 class _EngineStats(ctypes.Structure):
     _fields_ = [
         ("capture_fps", ctypes.c_double),
@@ -63,6 +74,13 @@ class _EngineStats(ctypes.Structure):
         ("decode_latency_ms", ctypes.c_double),
         ("render_latency_ms", ctypes.c_double),
         ("network_rtt_ms", ctypes.c_double),
+        ("send_bitrate", ctypes.c_double),
+        ("packets_sent", ctypes.c_uint64),
+        ("packets_dropped", ctypes.c_uint64),
+        ("transport_frames_dropped", ctypes.c_uint64),
+        ("transport_errors", ctypes.c_uint64),
+        ("transport_queue_depth", ctypes.c_uint32),
+        ("estimated_loss", ctypes.c_double),
     ]
 
 
@@ -81,6 +99,13 @@ class NativeEngineStats:
     decode_latency_ms: float
     render_latency_ms: float
     network_rtt_ms: float
+    send_bitrate: float
+    packets_sent: int
+    packets_dropped: int
+    transport_frames_dropped: int
+    transport_errors: int
+    transport_queue_depth: int
+    estimated_loss: float
 
 
 def _bind(dll: ctypes.CDLL) -> None:
@@ -117,6 +142,21 @@ def _bind(dll: ctypes.CDLL) -> None:
     dll.snowlink_engine_stop_stream.restype = ctypes.c_int32
     dll.snowlink_engine_stop_stream.argtypes = [ctypes.c_void_p]
 
+    dll.snowlink_engine_connect_transport.restype = ctypes.c_int32
+    dll.snowlink_engine_connect_transport.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(_TransportConfig)
+    ]
+    dll.snowlink_engine_create_transport_offer.restype = ctypes.c_int32
+    dll.snowlink_engine_create_transport_offer.argtypes = [ctypes.c_void_p]
+    for name in ("snowlink_engine_get_local_sdp", "snowlink_engine_get_local_sdp_type"):
+        fn = getattr(dll, name)
+        fn.restype = ctypes.c_int32
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+    dll.snowlink_engine_set_remote_sdp.restype = ctypes.c_int32
+    dll.snowlink_engine_set_remote_sdp.argtypes = [
+        ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p
+    ]
+
     dll.snowlink_engine_set_target_fps.restype = ctypes.c_int32
     dll.snowlink_engine_set_target_fps.argtypes = [ctypes.c_void_p, ctypes.c_int32]
 
@@ -134,7 +174,10 @@ def _bind(dll: ctypes.CDLL) -> None:
     dll.snowlink_engine_set_capture_cursor_in_video.argtypes = [ctypes.c_void_p, ctypes.c_int32]
 
     dll.snowlink_engine_get_capture_status.restype = ctypes.c_int32
-    dll.snowlink_engine_get_capture_status.argtypes = [ctypes.c_void_p, ctypes.POINTER(_CaptureStatus)]
+    dll.snowlink_engine_get_capture_status.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_CaptureStatus),
+    ]
 
     dll.snowlink_engine_request_keyframe.restype = ctypes.c_int32
     dll.snowlink_engine_request_keyframe.argtypes = [ctypes.c_void_p]
@@ -287,6 +330,52 @@ class NativeEngine:
             allow_not_implemented=True,
         )
 
+    def connect(
+        self,
+        *,
+        bind_address: str,
+        port_min: int = 1024,
+        port_max: int = 65535,
+        mtu: int = 1200,
+        frame_queue_limit: int = 2,
+        nack_packet_limit: int = 256,
+    ) -> None:
+        """Initialize native ICE/DTLS-SRTP transport; media stays in C++."""
+        self._ensure_alive()
+        cfg = _TransportConfig(
+            bind_address.encode("utf-8"), port_min, port_max, mtu,
+            frame_queue_limit, nack_packet_limit,
+        )
+        self._check(int(self._dll.snowlink_engine_connect_transport(
+            self._handle, ctypes.byref(cfg)
+        )))
+
+    def create_offer(self) -> None:
+        self._ensure_alive()
+        self._check(int(self._dll.snowlink_engine_create_transport_offer(self._handle)))
+
+    def local_description(self) -> dict[str, str] | None:
+        """Return gathered SDP, or None while host ICE gathering is in progress."""
+        self._ensure_alive()
+        values: list[str] = []
+        for name in ("snowlink_engine_get_local_sdp", "snowlink_engine_get_local_sdp_type"):
+            fn = getattr(self._dll, name)
+            required = int(fn(self._handle, None, 0))
+            if required == 1:
+                return None
+            if required <= 0:
+                self._check(required)
+            buffer = ctypes.create_string_buffer(required)
+            self._check(int(fn(self._handle, buffer, required)))
+            values.append(buffer.value.decode("utf-8"))
+        return {"sdp": values[0], "type": values[1]}
+
+    def set_remote_description(self, *, sdp: str, sdp_type: str = "answer") -> None:
+        self._ensure_alive()
+        self._check(int(self._dll.snowlink_engine_set_remote_sdp(
+            self._handle, sdp.encode("utf-8"), sdp_type.encode("ascii")
+        )))
+
     def stop_stream(self) -> None:
         self._ensure_alive()
         self._check(int(self._dll.snowlink_engine_stop_stream(self._handle)))
@@ -327,7 +416,13 @@ class NativeEngine:
     def get_capture_status(self) -> NativeCaptureStatus:
         self._ensure_alive()
         raw = _CaptureStatus()
-        self._check(int(self._dll.snowlink_engine_get_capture_status(self._handle, ctypes.byref(raw))))
+        self._check(
+            int(
+                self._dll.snowlink_engine_get_capture_status(
+                    self._handle, ctypes.byref(raw)
+                )
+            )
+        )
         return NativeCaptureStatus(
             borderless_capture_available=bool(raw.borderless_capture_available),
             borderless_capture_granted=bool(raw.borderless_capture_granted),
@@ -358,6 +453,13 @@ class NativeEngine:
             decode_latency_ms=float(raw.decode_latency_ms),
             render_latency_ms=float(raw.render_latency_ms),
             network_rtt_ms=float(raw.network_rtt_ms),
+            send_bitrate=float(raw.send_bitrate),
+            packets_sent=int(raw.packets_sent),
+            packets_dropped=int(raw.packets_dropped),
+            transport_frames_dropped=int(raw.transport_frames_dropped),
+            transport_errors=int(raw.transport_errors),
+            transport_queue_depth=int(raw.transport_queue_depth),
+            estimated_loss=float(raw.estimated_loss),
         )
 
     def state(self) -> int:

@@ -91,6 +91,13 @@ struct EngineStats {
     double decode_latency_ms = 0.0;
     double render_latency_ms = 0.0;
     double network_rtt_ms = 0.0;
+    double send_bitrate = 0.0;
+    std::uint64_t packets_sent = 0;
+    std::uint64_t packets_dropped = 0;
+    std::uint64_t transport_frames_dropped = 0;
+    std::uint64_t transport_errors = 0;
+    std::uint32_t transport_queue_depth = 0;
+    double estimated_loss = 0.0;
 };
 
 } // namespace snowlink

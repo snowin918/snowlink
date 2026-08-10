@@ -1,7 +1,9 @@
 #include "snowlink/c_api.h"
 #include "snowlink/engine.h"
+#include "snowlink/transport.h"
 
 #include <cstdint>
+#include <cstring>
 #include <exception>
 
 using namespace snowlink;
@@ -93,6 +95,49 @@ int32_t snowlink_engine_stop_stream(void* engine_handle) noexcept {
     return engine->stop_stream();
 }
 
+int32_t snowlink_engine_connect_transport(void* engine_handle, const SnowlinkTransportConfig* config) noexcept {
+    if (!engine_handle || !config) return -1;
+    TransportConfig internal{};
+    if (config->bind_address) internal.bind_address = config->bind_address;
+    internal.port_min = config->port_min ? config->port_min : 1024;
+    internal.port_max = config->port_max ? config->port_max : 65535;
+    internal.mtu = config->mtu ? config->mtu : 1200;
+    internal.frame_queue_limit = config->frame_queue_limit ? config->frame_queue_limit : 2;
+    internal.nack_packet_limit = config->nack_packet_limit ? config->nack_packet_limit : 256;
+    return static_cast<SnowlinkEngine*>(engine_handle)->connect_transport(internal);
+}
+
+int32_t snowlink_engine_create_transport_offer(void* engine_handle) noexcept {
+    return engine_handle ? static_cast<SnowlinkEngine*>(engine_handle)->create_transport_offer() : -1;
+}
+
+namespace {
+int32_t copy_description_part(void* handle, char* buffer, uint32_t size, bool want_type) {
+    if (!handle) return -1;
+    std::string sdp, type;
+    const int32_t result = static_cast<SnowlinkEngine*>(handle)->get_transport_local_description(sdp, type);
+    if (result != 0) return result;
+    const std::string& value = want_type ? type : sdp;
+    const auto required = static_cast<uint32_t>(value.size() + 1);
+    if (!buffer || size < required) return static_cast<int32_t>(required);
+    std::memcpy(buffer, value.c_str(), required);
+    return 0;
+}
+}
+
+int32_t snowlink_engine_get_local_sdp(void* handle, char* buffer, uint32_t size) noexcept {
+    return copy_description_part(handle, buffer, size, false);
+}
+
+int32_t snowlink_engine_get_local_sdp_type(void* handle, char* buffer, uint32_t size) noexcept {
+    return copy_description_part(handle, buffer, size, true);
+}
+
+int32_t snowlink_engine_set_remote_sdp(void* handle, const char* sdp, const char* type) noexcept {
+    if (!handle || !sdp || !type) return -1;
+    return static_cast<SnowlinkEngine*>(handle)->set_transport_remote_description(sdp, type);
+}
+
 int32_t snowlink_engine_set_target_fps(void* engine_handle, int32_t target_fps) noexcept {
     if (!engine_handle) {
         return -1;
@@ -172,6 +217,13 @@ int32_t snowlink_engine_get_stats(void* engine_handle, SnowlinkEngineStats* stat
     stats->decode_latency_ms = internal.decode_latency_ms;
     stats->render_latency_ms = internal.render_latency_ms;
     stats->network_rtt_ms = internal.network_rtt_ms;
+    stats->send_bitrate = internal.send_bitrate;
+    stats->packets_sent = internal.packets_sent;
+    stats->packets_dropped = internal.packets_dropped;
+    stats->transport_frames_dropped = internal.transport_frames_dropped;
+    stats->transport_errors = internal.transport_errors;
+    stats->transport_queue_depth = internal.transport_queue_depth;
+    stats->estimated_loss = internal.estimated_loss;
     return result;
 }
 

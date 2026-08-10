@@ -6,12 +6,11 @@ import pytest
 
 from snowlink.native_engine import (
     NativeEngine,
+    NativeEngineError,
     NativeEngineUnavailable,
     is_native_engine_available,
     probe_native_engine,
 )
-from snowlink.native_engine.engine import SNOWLINK_ERR_NOT_IMPLEMENTED
-
 
 pytestmark = pytest.mark.skipif(
     not is_native_engine_available(),
@@ -44,11 +43,23 @@ def test_native_engine_context_manager() -> None:
         assert stats.bitrate_bps >= 0
 
 
-def test_native_engine_capture_stream_not_implemented() -> None:
+def test_native_transport_control_plane() -> None:
     with NativeEngine.create() as engine:
-        assert engine.start_capture(target_fps=30) == SNOWLINK_ERR_NOT_IMPLEMENTED
-        assert engine.start_stream() == SNOWLINK_ERR_NOT_IMPLEMENTED
-        assert engine.request_keyframe() == SNOWLINK_ERR_NOT_IMPLEMENTED
+        engine.connect(bind_address="127.0.0.1", port_min=40000, port_max=40100)
+        engine.create_offer()
+        # ICE gathering is asynchronous; Python polls SDP but never handles frames.
+        description = None
+        for _ in range(100):
+            description = engine.local_description()
+            if description is not None:
+                break
+            __import__("time").sleep(0.01)
+        assert description is not None
+        assert description["type"] == "offer"
+        assert "m=video" in description["sdp"]
+        assert "H264/90000" in description["sdp"]
+        with pytest.raises(NativeEngineError):
+            engine.start_stream()
 
 
 def test_probe_native_engine() -> None:

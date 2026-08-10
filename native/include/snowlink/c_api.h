@@ -28,6 +28,15 @@ typedef struct SnowlinkStreamConfig {
     int32_t bitrate_bps;
 } SnowlinkStreamConfig;
 
+typedef struct SnowlinkTransportConfig {
+    const char* bind_address;
+    uint16_t port_min;
+    uint16_t port_max;
+    uint32_t mtu;
+    uint32_t frame_queue_limit;
+    uint32_t nack_packet_limit;
+} SnowlinkTransportConfig;
+
 typedef struct SnowlinkEngineStats {
     double capture_fps;
     double encode_fps;
@@ -42,6 +51,13 @@ typedef struct SnowlinkEngineStats {
     double decode_latency_ms;
     double render_latency_ms;
     double network_rtt_ms;
+    double send_bitrate;
+    uint64_t packets_sent;
+    uint64_t packets_dropped;
+    uint64_t transport_frames_dropped;
+    uint64_t transport_errors;
+    uint32_t transport_queue_depth;
+    double estimated_loss;
 } SnowlinkEngineStats;
 
 typedef struct SnowlinkCaptureStatus {
@@ -65,6 +81,11 @@ SNOWLINK_API int32_t snowlink_engine_start_capture(void* engine_handle, const Sn
 SNOWLINK_API int32_t snowlink_engine_stop_capture(void* engine_handle) noexcept;
 SNOWLINK_API int32_t snowlink_engine_start_stream(void* engine_handle, const SnowlinkStreamConfig* config) noexcept;
 SNOWLINK_API int32_t snowlink_engine_stop_stream(void* engine_handle) noexcept;
+SNOWLINK_API int32_t snowlink_engine_connect_transport(void* engine_handle, const SnowlinkTransportConfig* config) noexcept;
+SNOWLINK_API int32_t snowlink_engine_create_transport_offer(void* engine_handle) noexcept;
+SNOWLINK_API int32_t snowlink_engine_get_local_sdp(void* engine_handle, char* buffer, uint32_t buffer_size) noexcept;
+SNOWLINK_API int32_t snowlink_engine_get_local_sdp_type(void* engine_handle, char* buffer, uint32_t buffer_size) noexcept;
+SNOWLINK_API int32_t snowlink_engine_set_remote_sdp(void* engine_handle, const char* sdp, const char* type) noexcept;
 SNOWLINK_API int32_t snowlink_engine_set_target_fps(void* engine_handle, int32_t target_fps) noexcept;
 SNOWLINK_API int32_t snowlink_engine_set_bitrate(void* engine_handle, int32_t bitrate_bps) noexcept;
 SNOWLINK_API int32_t snowlink_engine_set_resolution(void* engine_handle, int32_t width, int32_t height) noexcept;

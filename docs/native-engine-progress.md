@@ -15,10 +15,111 @@ CaptureManager (auto | wgc | dxgi)
   -> pooled NV12 ID3D11Texture2D
   -> Media Foundation H.264 encoder MFT (D3D11 device manager)
   -> native EncodedFrame access units
+  -> bounded native latest-frame queue
+  -> H.264 RTP/FU-A packetizer
+  -> ICE + DTLS-SRTP WebRTC transport
+  -> network
 ```
 
 There is no staging texture, `Map`, CPU readback, Python bytes, NumPy, OpenCV,
 Qt image, or CPU BGRA step. The legacy Python DXcam/aiortc path is unchanged.
+
+## Existing transport audit and compatibility
+
+The working Python implementation is WebRTC through aiortc, not the Phase 0 TCP
+diagnostic socket. Signaling is a sharer-hosted WebSocket on TCP port 3847. Its
+versioned JSON envelopes perform hello, a nonce-bound 6-digit pairing challenge,
+rate limiting, explicit sharer approval, and SDP offer/answer exchange. ICE is
+non-trickle, host-candidate-only, bound to the selected LAN/VPN IPv4; there is no
+STUN or TURN service. This intentionally assumes direct LAN or VPN reachability.
+
+Media normally uses ICE-selected UDP, standard RTP/RTCP, DTLS certificate
+fingerprints, and SRTP. UDP ports are ephemeral. RTP supplies a 16-bit sequence,
+32-bit codec timestamp, SSRC, payload type, and marker bit. RTCP supplies sender
+reports, receiver feedback, RTT, NACK, and PLI. WebRTC consent freshness is the
+keepalive/liveness mechanism. DTLS-SRTP supplies encryption, integrity, and peer
+fingerprint verification. Video retransmission is selective NACK rather than a
+reliable byte stream; input/control reliability remains a separate concern.
+
+The native sender preserves that protocol with pinned libdatachannel 0.24.3.
+Existing aiortc viewers can answer its standards-based H.264 offer when H.264 is
+enabled (`allow_h264_fallback` in the current viewer configuration). VP8 remains
+the legacy Python sender default; native hardware output requires H.264. No raw
+custom UDP media protocol was added.
+
+## Native WebRTC sender
+
+`Transport` creates a send-only H.264 WebRTC track. Python calls `connect`, asks
+for an offer, transports SDP through the existing authenticated/approved
+WebSocket exchange, applies the answer, then calls `start_stream`. The C ABI is:
+
+```
+snowlink_engine_connect_transport
+snowlink_engine_create_transport_offer
+snowlink_engine_get_local_sdp / _type
+snowlink_engine_set_remote_sdp
+snowlink_engine_start_stream / _stop_stream
+```
+
+The ctypes wrapper presents these as `NativeEngine.connect`, `create_offer`,
+`local_description`, `set_remote_description`, `start_stream`, and
+`stop_stream`. SDP polling is control traffic only. Python never receives an
+`EncodedFrame`, NAL unit, RTP packet, or per-frame callback.
+
+The stream worker observes the latest capture texture, submits GPU preprocessing,
+wraps the resulting NV12 texture in a Media Foundation sample, drains compressed
+H.264 access units, and moves them into `Transport`. A dedicated sender worker
+packetizes and sends them. libdatachannel owns its ICE, DTLS, SRTP, and network
+threads. Shutdown first stops/joins the stream worker, flushes encoder/processor
+state, stops/joins the sender, closes the peer connection, and releases capture.
+The same object can initialize a fresh peer connection for reconnect.
+
+The encoder-to-transport queue defaults to two complete encoded frames and is
+configurable but may not be zero. When full, the oldest frame is discarded so
+new desktop state wins; no unbounded retry queue exists. The RTP NACK cache is
+independently bounded to 256 packets. RTCP PLI/FIR invokes the hardware encoder's
+native keyframe request directly. Congestion is visible upstream through queue
+depth, dropped frames, send bitrate, RTT, and transport errors; dynamic bitrate
+adaptation is deliberately left to session policy rather than hidden inside the
+network thread.
+
+`EngineStats` and the C/Python ABI expose `send_bitrate`, `packets_sent`,
+`packets_dropped`, `transport_frames_dropped`, `transport_queue_depth`, `rtt`,
+`estimated_loss`, and `transport_errors`. `estimated_loss` is reserved as zero
+until receiver-report loss is surfaced by the selected WebRTC backend; it is not
+fabricated from local queue drops.
+
+### Packet format and MTU
+
+The wire format is RFC 3550 RTP carrying RFC 6184 H.264 packetization-mode 1:
+
+- the DTLS-SRTP association identifies the authenticated media session;
+- SSRC identifies the video stream;
+- the RTP timestamp identifies all packets belonging to one encoded frame and
+  uses the standard 90 kHz video clock;
+- the RTP 16-bit sequence orders packets and exposes gaps;
+- the marker bit identifies the final packet of an access unit;
+- H.264 IDR NAL type identifies keyframes;
+- large NAL units use FU-A start/end fragments, while small NAL units remain
+  single-NAL packets.
+
+The configured path MTU defaults to 1200 bytes. The packetizer reserves transport
+overhead and emits media fragments below that limit, avoiding intentional IP
+fragmentation on normal IPv4, IPv6, LAN, and VPN paths. Encoded frames are never
+assumed to fit one datagram. RTP sequence wrap and timestamp wrap use their
+standard modular semantics.
+
+### Security boundary
+
+Pairing, rate limiting, one-viewer approval, and SDP carriage remain in the
+existing Python WebSocket signaling layer. The approved SDP contains the DTLS
+fingerprint; native libdatachannel performs ICE connectivity checks, DTLS, peer
+fingerprint verification, SRTP key derivation, encryption, and authentication.
+OpenSSL and libsrtp implement cryptography; Snowlink implements no cipher or key
+exchange. The existing signaling channel is still plain `ws://` on the selected
+LAN/VPN interface, so pairing approval is the signaling trust boundary exactly
+as before; this phase does not claim TLS for signaling or cryptographically bind
+the separate generated `session_secret` to DTLS.
 
 ## Shared capture abstraction and auto selection
 
@@ -169,7 +270,33 @@ native\build\bin\Release\snowlink_capture_test.exe --backend auto --monitor 1 --
 native\build\bin\Release\snowlink_capture_test.exe --backend auto --monitor 0 --seconds 30 --preprocess
 native\build\bin\Release\snowlink_capture_test.exe --backend dxgi --monitor 0 --seconds 30 --target 1920 1080
 native\build\bin\Release\snowlink_encoder_benchmark.exe --backend auto --monitor 0 --seconds 30 --target 1920 1080 --fps 60 --bitrate 8000000
+native\build\bin\Release\snowlink_transport_packet_test.exe
+.\.venv\Scripts\python.exe -m pytest tests/unit/test_native_engine_lifecycle.py tests/unit/test_native_engine_backend.py -q
 ```
+
+The native build fetches pinned libdatachannel commit
+`c6696d157b5612df2a741d9a03b192b47ab6cefb` and requires OpenSSL 1.1 or newer.
+On Windows, CMake copies the discovered OpenSSL runtime DLLs beside
+`snowlink_engine.dll`; production packaging must include those files and their
+applicable licenses.
+
+Transport validation on 2026-08-09:
+
+- Release `snowlink_engine.dll` and the packet test compile with VS 2022,
+  Windows SDK 10.0.26100, libdatachannel 0.24.3, libsrtp, and OpenSSL 3.0.21.
+- An 8197-byte Annex-B IDR access unit produced nine RTP/FU-A packets; every
+  packet was at most 1200 bytes and ordered reconstruction matched byte-for-byte.
+- Reordered fragments reconstructed correctly. Removing a middle FU-A fragment
+  prevented the damaged frame from comparing as complete.
+- Python control-plane tests generated a host-only native offer, exercised clean
+  shutdown, and passed 7/7. No per-frame Python API exists.
+- A new `connect` call closes the prior peer and constructs fresh ICE/DTLS state.
+- RTCP NACK support is bounded to 256 cached packets and RTCP PLI/FIR is wired to
+  `H264HardwareEncoder::request_keyframe`.
+- A live two-machine encrypted media run still requires two interactive Windows
+  desktops because capture is unavailable in the automation desktop. Validate
+  reconnect, real network loss, RTT/loss stats, and receiver-driven PLI there;
+  this phase makes no claim that those environment-dependent checks ran here.
 
 The test selects auto/WGC/DXGI, acquires only GPU textures, and prints periodic
 and final FPS, dimensions, rotation, dirty/move counts, cursor updates, timeouts,
@@ -221,4 +348,4 @@ Encoder-phase validation on 2026-08-09:
 
 ## Next phase
 
-Next phase: build native low-latency media transport.
+Next phase: implement native receive, hardware decode, and D3D11 rendering.

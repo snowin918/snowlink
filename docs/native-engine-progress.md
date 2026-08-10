@@ -11,7 +11,9 @@ CaptureManager (auto | wgc | dxgi)
   -> DXGI: IDXGIOutput1::DuplicateOutput -> IDXGIOutputDuplication
   -> ID3D11Texture2D
   -> GPU CopyResource into a 2-slot Snowlink-owned latest-frame pool
-  -> future native processor/encoder
+  -> GpuFrameProcessor (D3D11 video processor: crop/rotate/scale/convert)
+  -> pooled NV12 ID3D11Texture2D
+  -> future native hardware encoder
 ```
 
 There is no staging texture, `Map`, CPU readback, Python bytes, NumPy, OpenCV,
@@ -63,8 +65,53 @@ resources. Before releasing them, Snowlink performs a GPU `CopyResource` into a
 publication slot. `get_latest_frame` returns an AddRef'd slot texture; the caller
 releases it. No CPU pixel copy is performed.
 
-The future processor/encoder should consume textures on the backend device or
-use explicit D3D shared-resource synchronization.
+`GpuFrameProcessor` obtains the capture texture's D3D11 device and uses that
+device's immediate video context. Its output is therefore directly consumable
+by a hardware encoder on the same device. Cross-device use will require explicit
+shared-resource synchronization and is not part of this phase. D3D11 multithread
+protection is enabled because capture and processing may submit from different
+threads through the device's shared immediate context.
+
+## Common GPU preprocessing
+
+The common processor uses the D3D11 video processing API
+(`ID3D11VideoProcessor`) rather than a CPU conversion path or custom shaders.
+`VideoProcessorBlt` performs source cropping, optional scaling, rotation (through
+`ID3D11VideoContext1`), and color conversion in one GPU submission. Driver format
+support is checked when resources are created, so unsupported input/output
+combinations fail explicitly.
+
+The primary output is `DXGI_FORMAT_NV12`. The small public format abstraction also
+defines P010 and BGRA for future encoder/HDR paths; availability remains dependent
+on the display driver's video processor. NV12 and P010 output dimensions must be
+even. Target dimensions may be independent of capture dimensions (for example,
+2560x1440 or 3840x2160 to 1920x1080); zero target dimensions select the natural
+post-crop, post-rotation size.
+
+Two default-usage output textures and their video output views are allocated as a
+reusable pool. Input views are cached for the two capture publication textures.
+The pool is recreated only when the D3D device, source size/format, crop size,
+target size, or output format changes. No staging resource, `Map`, upload, `Flush`,
+GPU query, `GetData`, or CPU wait exists in the normal preprocessing path.
+
+`process_frame` records GPU work and publishes one output slot; `get_latest_frame`
+returns an AddRef'd texture that the caller releases. Publication is latest-only:
+an unobserved output is replaced and counted rather than appended to a queue.
+Together with capture's existing latest-frame pool, this bounds both sides of the
+processor. The future encoder must submit its read on the same ordered D3D11
+device/context before a pooled slot is reused, or add explicit synchronization
+if it uses a separate context/device.
+
+Statistics include `gpu_preprocess_frames`, unobserved `frames_replaced`, pool
+`resolution_changes`, and average CPU submission latency. GPU timing queries are
+intentionally omitted because collecting exact completion time would add waits.
+
+Known limitations: format conversion, scaling quality, and maximum dimensions are
+driver-dependent; rotation needs `ID3D11VideoContext1`; color-space/range controls
+currently use the driver's SDR defaults; and cross-device encoder handoff is not
+implemented. The two-slot pool assumes the encoder submits reads in the same D3D11
+command ordering before a slot cycles back. These constraints should be resolved
+or validated as part of encoder integration.
 
 ## Dirty/move metadata and cursor
 
@@ -86,6 +133,8 @@ powershell -ExecutionPolicy Bypass -File scripts/dev/build_native_engine.ps1
 native\build\bin\Release\snowlink_capture_test.exe --backend wgc --monitor 0 --seconds 10
 native\build\bin\Release\snowlink_capture_test.exe --backend dxgi --monitor 0 --seconds 30
 native\build\bin\Release\snowlink_capture_test.exe --backend auto --monitor 1 --seconds 30
+native\build\bin\Release\snowlink_capture_test.exe --backend auto --monitor 0 --seconds 30 --preprocess
+native\build\bin\Release\snowlink_capture_test.exe --backend dxgi --monitor 0 --seconds 30 --target 1920 1080
 ```
 
 The test selects auto/WGC/DXGI, acquires only GPU textures, and prints periodic
@@ -101,7 +150,12 @@ Validation on 2026-08-09:
   is absent (`0x80070424`).
 - DXGI `DuplicateOutput` returns `0x80070005` (`E_ACCESSDENIED`) in this
   non-interactive/secure automation desktop. Live FPS, metadata, cursor, and
-  access-loss recovery verification therefore require an interactive desktop.
+access-loss recovery verification therefore require an interactive desktop.
+
+The optional `--preprocess` path submits each newly observed capture texture to
+the GPU processor, obtains the latest NV12 GPU texture, and discards it without
+encoding. `--target W H` additionally tests scaling. This path never maps a
+texture or reads screen pixels back to the CPU.
 
 ## Remaining work
 
@@ -110,8 +164,8 @@ Validation on 2026-08-09:
 - Complete production MSIX identity/signing/assets for optional WGC borderless
   capture.
 - Add production runtime failover/backoff above `CaptureManager`.
-- Feed the common GPU texture/metadata contract into preprocessing and encoding.
+- Connect the pooled NV12 output to the native hardware encoder.
 
 ## Next phase
 
-Next phase: build shared D3D11 GPU preprocessing and zero-copy frame pipeline.
+Next phase: implement native hardware H.264 encoder.

@@ -1,4 +1,5 @@
 #include "snowlink/capture.h"
+#include "snowlink/gpu_frame_processor.h"
 
 #include <Windows.h>
 #include <d3d11.h>
@@ -13,11 +14,17 @@ int wmain(int argc, wchar_t** argv) {
     int seconds = 10;
     bool cursor = false;
     int backend = static_cast<int>(snowlink::CaptureBackend::Auto);
+    bool preprocess = false;
+    int target_width = 0, target_height = 0;
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
         if (arg == L"--monitor" && i + 1 < argc) monitor = _wtoi(argv[++i]);
         else if (arg == L"--seconds" && i + 1 < argc) seconds = std::max(1, _wtoi(argv[++i]));
         else if (arg == L"--cursor") cursor = true;
+        else if (arg == L"--preprocess") preprocess = true;
+        else if (arg == L"--target" && i + 2 < argc) {
+            preprocess = true; target_width = _wtoi(argv[++i]); target_height = _wtoi(argv[++i]);
+        }
         else if (arg == L"--backend" && i + 1 < argc) {
             const std::wstring value = argv[++i];
             if (value == L"auto") backend = -1;
@@ -26,7 +33,7 @@ int wmain(int argc, wchar_t** argv) {
             else { std::wcerr << L"invalid backend\n"; return 2; }
         }
         else {
-            std::wcerr << L"usage: snowlink_capture_test [--backend auto|wgc|dxgi] [--monitor N] [--seconds N] [--cursor]\n";
+            std::wcerr << L"usage: snowlink_capture_test [--backend auto|wgc|dxgi] [--monitor N] [--seconds N] [--cursor] [--preprocess] [--target W H]\n";
             return 2;
         }
     }
@@ -43,6 +50,11 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     const auto started = std::chrono::steady_clock::now();
+    snowlink::GpuFrameProcessor processor;
+    snowlink::GpuFrameProcessorConfig processor_config{};
+    processor_config.target_width = static_cast<uint32_t>(std::max(0, target_width));
+    processor_config.target_height = static_cast<uint32_t>(std::max(0, target_height));
+    processor.configure(processor_config);
     uint64_t observed = 0;
     uint64_t last_id = 0;
     auto next_report = started + std::chrono::seconds(1);
@@ -54,7 +66,22 @@ int wmain(int argc, wchar_t** argv) {
         snowlink::PointerState pointer;
         if (capture.get_latest_frame(&texture, &id, &metadata, &pointer) == 0) {
             // Deliberately inspect only GPU metadata; never Map or copy to staging.
-            if (id != last_id) { ++observed; last_id = id; }
+            if (id != last_id) {
+                ++observed; last_id = id;
+                if (preprocess) {
+                    snowlink::CaptureStatus live_status{};
+                    capture.get_capture_status(live_status);
+                    processor_config.rotation = live_status.rotation;
+                    processor.configure(processor_config);
+                    const int32_t process_result = processor.process_frame(texture, id);
+                    if (process_result != 0) {
+                        std::cerr << "GPU preprocess failed: " << process_result << "\n";
+                        texture->Release(); capture.stop(); return 4;
+                    }
+                    ID3D11Texture2D* processed = nullptr; uint64_t processed_id = 0;
+                    if (processor.get_latest_frame(&processed, &processed_id) == 0) processed->Release();
+                }
+            }
             texture->Release();
         }
         if (std::chrono::steady_clock::now() >= next_report) {
@@ -73,6 +100,8 @@ int wmain(int argc, wchar_t** argv) {
     capture.get_capture_status(status);
     capture.get_stats(stats);
     capture.stop();
+    snowlink::GpuFrameProcessorStats process_stats{};
+    processor.get_stats(process_stats);
     const double elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started).count();
     std::cout << "frames=" << stats.frames_captured
@@ -92,5 +121,11 @@ int wmain(int argc, wchar_t** argv) {
               << " borderless_granted=" << status.borderless_capture_granted
               << " border_active=" << status.capture_border_active
               << " cursor_in_video=" << status.capture_cursor_in_video << "\n";
+    if (preprocess) {
+        std::cout << "gpu_preprocess_frames=" << process_stats.gpu_preprocess_frames
+                  << " preprocess_replaced=" << process_stats.frames_replaced
+                  << " resolution_changes=" << process_stats.resolution_changes
+                  << " submit_latency_ms=" << process_stats.preprocess_latency_ms << "\n";
+    }
     return stats.frames_captured ? 0 : 3;
 }

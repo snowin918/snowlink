@@ -17,6 +17,7 @@ add_library(snowlink_engine SHARED
     src/input/input.cpp
     src/capture/wgc_capture_backend.cpp
     src/capture/dxgi_capture_backend.cpp
+    src/process/gpu_frame_processor.cpp
 )
 
 target_include_directories(snowlink_engine
@@ -54,6 +55,7 @@ if (SNOWLINK_BUILD_CAPTURE_TEST)
         src/capture/capture_manager.cpp
         src/capture/wgc_capture_backend.cpp
         src/capture/dxgi_capture_backend.cpp)
+    target_sources(snowlink_capture_test PRIVATE src/process/gpu_frame_processor.cpp)
     target_include_directories(snowlink_capture_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_definitions(snowlink_capture_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(snowlink_capture_test PRIVATE d3d11 dxgi windowsapp)
